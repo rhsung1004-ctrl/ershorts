@@ -187,20 +187,21 @@ jobs:
           $p = Start-Process "$bin/ERShorts.exe" -WorkingDirectory $bin -PassThru
           $sec = 0
           while ($sec -lt 30 -and -not $p.HasExited) { Start-Sleep 1; $sec++ }
-          if ($p.HasExited) { $status = "$sec 초 만에 종료됨 (종료 코드 $($p.ExitCode))" }
+          $crashed = $p.HasExited
+          if ($crashed) { $status = "$sec 초 만에 종료됨 (종료 코드 $($p.ExitCode))" }
           else { $status = "30초 동안 정상 실행"; Stop-Process -Id $p.Id -Force }
           $log = Get-ChildItem $logDir -Filter *.txt -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           function Esc([string]$s) { $s.Replace('%','%25').Replace("`r",'').Replace("`n",'%0A') }
           Write-Output "::notice title=실행 테스트::$status"
           if ($log) {
             $lines = Get-Content $log.FullName -Encoding utf8
-            $important = $lines | Where-Object { $_ -match '충돌|치명|error|실패|warning|Failed|failed' } | Select-Object -Last 40
+            $important = $lines | Where-Object { $_ -match '충돌|치명|error|실패|warning|Failed|failed|미리보기|#\d\d ' } | Select-Object -Last 60
             Write-Output ("::notice title=로그 - 오류/경고::" + (Esc ($important -join "`n")))
             Write-Output ("::notice title=로그 - 마지막 50줄::" + (Esc (($lines | Select-Object -Last 50) -join "`n")))
           } else {
             Write-Output "::warning title=실행 테스트::로그 파일이 만들어지지 않았습니다"
           }
-          if ($p.HasExited) { exit 1 }
+          if ($crashed) { exit 1 }
 
       - name: 압축
         run: Compress-Archive -Path "${{ github.workspace }}/ERShorts" -DestinationPath ERShorts-windows-x64.zip

@@ -82,8 +82,12 @@ void PreviewWidget::createDisplay()
 	info.window.hwnd = reinterpret_cast<void *>(w->winId());
 
 	m_display = obs_display_create(&info, 0xFF1E1E24);
-	if (m_display)
+	if (m_display) {
 		obs_display_add_draw_callback(m_display, &PreviewWidget::draw, this);
+		qInfo("미리보기 디스플레이 생성 (%dx%d)", size.width(), size.height());
+	} else {
+		qWarning("미리보기 디스플레이 생성 실패");
+	}
 }
 
 void PreviewWidget::resizeDisplay()
