@@ -154,6 +154,28 @@ jobs:
 
           Get-ChildItem $dist | Format-Table Name, Length
 
+      - name: 필수 파일 확인
+        run: |
+          $dist = "${{ github.workspace }}/ERShorts"
+          $required = @(
+            'ERShorts.exe', 'bin/64bit/ERShorts.exe', 'bin/64bit/obs.dll', 'bin/64bit/libobs-d3d11.dll',
+            'bin/64bit/w32-pthreads.dll', 'bin/64bit/ffmpeg.exe', 'bin/64bit/Qt6Core.dll', 'bin/64bit/Qt6Widgets.dll',
+            'bin/64bit/Qt6Multimedia.dll', 'bin/64bit/Qt6MultimediaWidgets.dll', 'bin/64bit/platforms/qwindows.dll',
+            'bin/64bit/vcruntime140.dll', 'bin/64bit/msvcp140.dll',
+            'obs-plugins/64bit/win-capture.dll', 'obs-plugins/64bit/win-wasapi.dll', 'obs-plugins/64bit/obs-ffmpeg.dll',
+            'obs-plugins/64bit/obs-x264.dll', 'obs-plugins/64bit/obs-nvenc.dll', 'obs-plugins/64bit/obs-outputs.dll',
+            'data/libobs/default.effect', 'data/obs-plugins/win-capture/graphics-hook64.dll',
+            'data/obs-plugins/win-capture/inject-helper64.exe', 'data/obs-plugins/win-capture/get-graphics-offsets64.exe'
+          )
+          $missing = $required | Where-Object { -not (Test-Path (Join-Path $dist $_)) }
+          $mm = (Get-ChildItem "$dist/bin/64bit/multimedia" -ErrorAction SilentlyContinue | ForEach-Object Name) -join ', '
+          $plugins = (Get-ChildItem "$dist/obs-plugins/64bit" -Filter *.dll | ForEach-Object BaseName) -join ', '
+          Write-Output "::notice title=패키지 확인::필수 파일 $($required.Count - $missing.Count)/$($required.Count) | 미디어 백엔드: $mm | OBS 플러그인: $plugins"
+          if ($missing) {
+            Write-Output "::error title=누락된 파일::$($missing -join ', ')"
+            throw "필수 파일 누락"
+          }
+
       - name: 압축
         run: Compress-Archive -Path "${{ github.workspace }}/ERShorts" -DestinationPath ERShorts-windows-x64.zip
 
