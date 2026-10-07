@@ -38,7 +38,7 @@ bool registerFile(const QString &path)
 	// 같은 이름의 다른 굵기와 섞이지 않도록 파일 자체의 굵기/기울임을 기억
 	const QRawFont raw(path, 32);
 	if (raw.isValid()) {
-		r.weight = raw.weight();
+		r.weight = QFont::Weight(raw.weight()); // Qt6: 100~900 값 그대로
 		r.style = raw.style();
 	}
 	g_registered.insert(path, r);
