@@ -90,7 +90,12 @@ jobs:
             -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR;$obs;$deps" `
             -Dlibobs_DIR="$obs/cmake/libobs" `
             -Dw32-pthreads_DIR="$obs/cmake/w32-pthreads"
-          cmake --build build --config Release --parallel
+          cmake --build build --config Release --parallel 2>&1 | Tee-Object -FilePath build.log
+          $code = $LASTEXITCODE
+          # 컴파일 오류를 Actions 화면(주석)에 보이도록 출력
+          Select-String -Path build.log -Pattern ': (fatal )?error |error C\d+|error LNK|CMake Error' |
+            Select-Object -First 25 | ForEach-Object { Write-Output ("::error title=컴파일 오류::" + $_.Line.Trim()) }
+          if ($code -ne 0) { exit $code }
 
       # ── 3. 실행 폴더 구성 ────────────────────────────────────────────
       - name: 실행 파일 패키징

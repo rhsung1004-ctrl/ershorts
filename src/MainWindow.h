@@ -14,6 +14,7 @@ class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
 class QSpinBox;
+class EditorWindow;
 class GlobalHotkey;
 class PreviewWidget;
 
@@ -37,12 +38,12 @@ private slots:
 	void openEditor();
 	void openProject();
 	void refreshWindowList();
-	void showEditor(class EditorWindow *editor);
 	void refreshClipList();
 	void log(const QString &msg);
 
 private:
 	void buildUi();
+	void showEditor(EditorWindow *editor);
 	void loadSettings();
 	void saveSettings();
 	ObsCore::Settings currentSettings() const;
