@@ -28,8 +28,13 @@
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStandardPaths>
+#include <QTimer>
+#include <QScreen>
+#include <QGuiApplication>
 #include <QUrl>
 #include <QVBoxLayout>
+
+#include <algorithm>
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
@@ -57,8 +62,22 @@ bool MainWindow::initialize(QString *error)
 {
 	if (!m_core->startup(error))
 		return false;
+	refreshWindowList(); // OBS 플러그인이 올라온 뒤에 창 목록을 채움
 	if (!m_core->applySettings(currentSettings(), error))
 		return false;
+
+	// 캡처 방식/창을 바꾸면 바로 적용
+	connect(m_captureMode, &QComboBox::currentIndexChanged, this, [this] {
+		m_gameWindow->setEnabled(m_captureMode->currentData().toInt() != int(ObsCore::CaptureMode::Monitor));
+		onApplySettings();
+	});
+	connect(m_gameWindow, &QComboBox::activated, this, [this] { onApplySettings(); });
+	m_gameWindow->setEnabled(m_captureMode->currentData().toInt() != int(ObsCore::CaptureMode::Monitor));
+
+	// 게임을 프로그램보다 늦게 켜도 창 캡처가 자동으로 연결되도록 3초마다 확인
+	auto *retarget = new QTimer(this);
+	connect(retarget, &QTimer::timeout, this, [this] { m_core->retargetWindowIfNeeded(); });
+	retarget->start(3000);
 
 	if (m_hotkey->registerKey(VK_F9))
 		log("단축키 F9: 최근 클립 저장");
@@ -109,9 +128,22 @@ void MainWindow::buildUi()
 	auto *recForm = new QFormLayout(recBox);
 	m_status = new QLabel;
 	m_captureMode = new QComboBox;
-	m_captureMode->addItems({"게임 캡처 (권장)", "모니터 캡처"});
-	m_gameWindow = new QLineEdit;
-	m_gameWindow->setPlaceholderText("비우면 전체화면 게임 자동 감지");
+	m_captureMode->addItem("창 캡처 (권장)", int(ObsCore::CaptureMode::Window));
+	m_captureMode->addItem("게임 캡처 (훅)", int(ObsCore::CaptureMode::Game));
+	m_captureMode->addItem("모니터 전체 캡처", int(ObsCore::CaptureMode::Monitor));
+	m_captureMode->setToolTip("창 캡처: 게임에 끼어들지 않아 안정적 (창/테두리 없는 창 모드 모두 가능)\n"
+				  "게임 캡처: 전체화면 전용, 안티치트가 막으면 검은 화면\n"
+				  "모니터 캡처: 화면 전체를 그대로 녹화");
+	m_gameWindow = new QComboBox;
+	m_gameWindow->setMinimumContentsLength(18);
+	m_gameWindow->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+	auto *refreshWinBtn = new QPushButton("↻");
+	refreshWinBtn->setFixedWidth(30);
+	refreshWinBtn->setToolTip("창 목록 새로고침");
+	auto *winRow = new QHBoxLayout;
+	winRow->addWidget(m_gameWindow, 1);
+	winRow->addWidget(refreshWinBtn);
+	connect(refreshWinBtn, &QPushButton::clicked, this, &MainWindow::refreshWindowList);
 	m_bufferSec = new QSpinBox;
 	m_bufferSec->setRange(10, 300);
 	m_bufferSec->setSuffix(" 초");
@@ -124,7 +156,7 @@ void MainWindow::buildUi()
 
 	recForm->addRow("상태", m_status);
 	recForm->addRow("캡처 방식", m_captureMode);
-	recForm->addRow("게임 창", m_gameWindow);
+	recForm->addRow("게임 창", winRow);
 	recForm->addRow("버퍼 길이", m_bufferSec);
 	recForm->addRow(m_mic);
 	recForm->addRow(m_autoStart);
@@ -191,8 +223,9 @@ void MainWindow::buildUi()
 void MainWindow::loadSettings()
 {
 	QSettings s("ERShorts", "ERShorts");
-	m_captureMode->setCurrentIndex(s.value("captureMode", 0).toInt());
-	m_gameWindow->setText(s.value("gameWindow").toString());
+	// 캡처 방식 (이전 버전 설정 키와 겹치지 않게 새 키 사용, 기본 = 창 캡처)
+	m_captureMode->setCurrentIndex(std::max(0, m_captureMode->findData(s.value("captureMode2", 0).toInt())));
+	m_gameWindow->setProperty("saved", s.value("gameWindow2").toString());
 	m_bufferSec->setValue(s.value("bufferSec", 45).toInt());
 	m_mic->setChecked(s.value("mic", false).toBool());
 	m_autoStart->setChecked(s.value("autoStart", true).toBool());
@@ -204,8 +237,8 @@ void MainWindow::loadSettings()
 void MainWindow::saveSettings()
 {
 	QSettings s("ERShorts", "ERShorts");
-	s.setValue("captureMode", m_captureMode->currentIndex());
-	s.setValue("gameWindow", m_gameWindow->text());
+	s.setValue("captureMode2", m_captureMode->currentData().toInt());
+	s.setValue("gameWindow2", m_gameWindow->currentData().toString());
 	s.setValue("bufferSec", m_bufferSec->value());
 	s.setValue("mic", m_mic->isChecked());
 	s.setValue("autoStart", m_autoStart->isChecked());
@@ -215,9 +248,8 @@ void MainWindow::saveSettings()
 ObsCore::Settings MainWindow::currentSettings() const
 {
 	ObsCore::Settings st;
-	st.captureMode = m_captureMode->currentIndex() == 0 ? ObsCore::CaptureMode::Game
-							      : ObsCore::CaptureMode::Monitor;
-	st.gameWindow = m_gameWindow->text();
+	st.captureMode = ObsCore::CaptureMode(m_captureMode->currentData().toInt());
+	st.gameWindow = m_gameWindow->currentData().toString();
 	st.bufferSeconds = m_bufferSec->value();
 	st.captureMic = m_mic->isChecked();
 	st.outputDir = clipDir();
@@ -303,8 +335,7 @@ void MainWindow::openEditor()
 	QDir().mkpath(projectsDir());
 	const QString path =
 		projectsDir() + "/영상_" + QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss") + ".json";
-	auto *editor = new EditorWindow(path, clips, clipDir(), shortsDir(), this);
-	editor->show();
+	showEditor(new EditorWindow(path, clips, clipDir(), shortsDir(), this));
 }
 
 void MainWindow::openProject()
@@ -313,8 +344,40 @@ void MainWindow::openProject()
 	const QString path = QFileDialog::getOpenFileName(this, "프로젝트 열기", projectsDir(), "ERShorts 프로젝트 (*.json)");
 	if (path.isEmpty())
 		return;
-	auto *editor = new EditorWindow(path, {}, clipDir(), shortsDir(), this);
+	showEditor(new EditorWindow(path, {}, clipDir(), shortsDir(), this));
+}
+
+void MainWindow::refreshWindowList()
+{
+	const QString keep = m_gameWindow->count() > 0 ? m_gameWindow->currentData().toString()
+						       : m_gameWindow->property("saved").toString();
+	m_gameWindow->blockSignals(true);
+	m_gameWindow->clear();
+	m_gameWindow->addItem("자동 (이터널리턴 창 찾기)", QString());
+	bool found = keep.isEmpty();
+	for (const ObsCore::WindowInfo &w : ObsCore::listWindows()) {
+		m_gameWindow->addItem(w.label, w.value);
+		if (w.value == keep)
+			found = true;
+	}
+	if (!found) // 저장해 둔 창이 지금은 안 떠 있어도 선택은 유지 (게임을 켜면 다시 연결됨)
+		m_gameWindow->addItem("(저장된 창) " + keep.section(':', 0, 0).replace("#3A", ":"), keep);
+	m_gameWindow->setCurrentIndex(std::max(0, m_gameWindow->findData(keep)));
+	m_gameWindow->blockSignals(false);
+}
+
+void MainWindow::showEditor(EditorWindow *editor)
+{
+	// 메인 창이 있는 모니터 가운데에, 화면 안에 들어오는 크기로 띄움
+	QScreen *scr = screen() ? screen() : QGuiApplication::primaryScreen();
+	const QRect avail = scr->availableGeometry();
+	const QSize size(std::min(1360, int(avail.width() * 0.92)), std::min(900, int(avail.height() * 0.9)));
+	editor->resize(size);
+	editor->move(avail.left() + (avail.width() - size.width()) / 2,
+		     avail.top() + std::max(0, (avail.height() - size.height()) / 2 - 20));
 	editor->show();
+	editor->raise();
+	editor->activateWindow();
 }
 
 void MainWindow::log(const QString &msg)

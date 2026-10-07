@@ -36,6 +36,8 @@ private slots:
 	void onReplayStateChanged(bool active);
 	void openEditor();
 	void openProject();
+	void refreshWindowList();
+	void showEditor(class EditorWindow *editor);
 	void refreshClipList();
 	void log(const QString &msg);
 
@@ -56,7 +58,7 @@ private:
 	// 녹화
 	QLabel *m_status = nullptr;
 	QComboBox *m_captureMode = nullptr;
-	QLineEdit *m_gameWindow = nullptr;
+	QComboBox *m_gameWindow = nullptr; // 캡처할 창 (0번 = 자동)
 	QSpinBox *m_bufferSec = nullptr;
 	QCheckBox *m_mic = nullptr;
 	QCheckBox *m_autoStart = nullptr;

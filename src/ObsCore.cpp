@@ -120,7 +120,23 @@ void ObsCore::rebuildCaptureSource()
 	obs_data_t *s = obs_data_create();
 	const char *id = nullptr;
 
-	if (m_settings.captureMode == CaptureMode::Game) {
+	m_windowTarget.clear();
+	if (m_settings.captureMode == CaptureMode::Window) {
+		id = "window_capture";
+		QString target = m_settings.gameWindow.trimmed();
+		if (target.isEmpty())
+			target = findEternalReturnWindow();
+		m_windowTarget = target;
+		obs_data_set_string(s, "window", u8(target).constData());
+		obs_data_set_int(s, "method", 2);   // Windows Graphics Capture
+		obs_data_set_int(s, "priority", 2); // 실행 파일 이름으로 창을 다시 찾음 (창 제목이 바뀌어도 OK)
+		obs_data_set_bool(s, "cursor", false);
+		obs_data_set_bool(s, "client_area", true);
+		if (target.isEmpty())
+			emit logMessage("이터널리턴 창을 아직 찾지 못했어요. 게임을 켜면 자동으로 연결됩니다.");
+		else
+			emit logMessage("캡처할 창: " + target);
+	} else if (m_settings.captureMode == CaptureMode::Game) {
 		id = "game_capture";
 		if (m_settings.gameWindow.trimmed().isEmpty()) {
 			obs_data_set_string(s, "capture_mode", "any_fullscreen");
@@ -154,8 +170,56 @@ void ObsCore::rebuildCaptureSource()
 	obs_sceneitem_set_bounds_alignment(m_captureItem, OBS_ALIGN_CENTER);
 	obs_sceneitem_set_bounds(m_captureItem, &bounds);
 
-	emit logMessage(m_settings.captureMode == CaptureMode::Game ? "게임 캡처 소스 준비됨"
-								     : "모니터 캡처 소스 준비됨");
+	emit logMessage(m_settings.captureMode == CaptureMode::Window ? "창 캡처 소스 준비됨"
+			: m_settings.captureMode == CaptureMode::Game ? "게임 캡처 소스 준비됨"
+								      : "모니터 캡처 소스 준비됨");
+}
+
+QVector<ObsCore::WindowInfo> ObsCore::listWindows()
+{
+	QVector<WindowInfo> out;
+	// OBS 창 캡처가 쓰는 창 목록을 그대로 가져옴
+	obs_properties_t *props = obs_get_source_properties("window_capture");
+	if (!props)
+		return out;
+	obs_property_t *p = obs_properties_get(props, "window");
+	const size_t n = p ? obs_property_list_item_count(p) : 0;
+	for (size_t i = 0; i < n; ++i) {
+		const char *name = obs_property_list_item_name(p, i);
+		const char *val = obs_property_list_item_string(p, i);
+		if (!val || !*val)
+			continue;
+		out.push_back({QString::fromUtf8(name ? name : val), QString::fromUtf8(val)});
+	}
+	obs_properties_destroy(props);
+	return out;
+}
+
+QString ObsCore::findEternalReturnWindow()
+{
+	// 실행 파일/창 제목에 Eternal Return(이터널리턴)이 들어간 창
+	for (const WindowInfo &w : listWindows()) {
+		const QString all = (w.label + " " + w.value).toLower();
+		if (all.contains("eternal") || all.contains(QString::fromUtf8("이터널")))
+			return w.value;
+	}
+	return {};
+}
+
+void ObsCore::retargetWindowIfNeeded()
+{
+	if (!m_capture || m_settings.captureMode != CaptureMode::Window || !m_windowTarget.isEmpty() ||
+	    !m_settings.gameWindow.trimmed().isEmpty())
+		return;
+	const QString found = findEternalReturnWindow();
+	if (found.isEmpty())
+		return;
+	m_windowTarget = found;
+	obs_data_t *s = obs_source_get_settings(m_capture);
+	obs_data_set_string(s, "window", u8(found).constData());
+	obs_source_update(m_capture, s);
+	obs_data_release(s);
+	emit logMessage("이터널리턴 창을 찾아서 연결했어요");
 }
 
 void ObsCore::rebuildAudioSources()
