@@ -1,18 +1,29 @@
 #include "EditorWindow.h"
 
+#include "AudioEnvelope.h"
 #include "BandLayout.h"
+#include "StylePresets.h"
 #include "FontManager.h"
 #include "BeatDetector.h"
 #include "ShortsExporter.h"
 #include "ThumbnailCache.h"
 #include "TimelineWidget.h"
 
+#include <QAction>
 #include <QAudioOutput>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QColorDialog>
 #include <QComboBox>
+#include <QCursor>
 #include <QDesktopServices>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QInputDialog>
+#include <QMenu>
+#include <QMouseEvent>
+#include <QToolButton>
+#include <QWheelEvent>
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QFile>
@@ -118,15 +129,22 @@ EditorWindow::EditorWindow(const QString &projectPath, const QStringList &newCli
 	setAttribute(Qt::WA_DeleteOnClose);
 	resize(1360, 900);
 
-	if (!m_project.load(projectPath))
+	const bool isNew = !m_project.load(projectPath);
+	if (isNew)
 		m_project.filePath = projectPath;
 	for (const QString &c : newClips)
 		m_project.addSource(c);
+	QString appliedStyle;
+	if (isNew && !StylePresets::defaultName().isEmpty()) { // 새 영상엔 기본 스타일 템플릿 자동 적용
+		appliedStyle = StylePresets::defaultName();
+		StylePresets::apply(StylePresets::load(appliedStyle), &m_project);
+	}
 	setWindowTitle("매드무비 편집 — " + QFileInfo(projectPath).completeBaseName());
 
 	m_exporter = new ShortsExporter(this);
 	m_beats = new BeatDetector(this);
 	m_thumbs = new ThumbnailCache(this);
+	m_env = new AudioEnvelope(this);
 
 	m_bgm = new QMediaPlayer(this);
 	m_bgmAudio = new QAudioOutput(this);
@@ -183,6 +201,9 @@ EditorWindow::EditorWindow(const QString &projectPath, const QStringList &newCli
 		});
 
 	loadUiFromProject();
+	refreshStyleList(appliedStyle);
+	if (!appliedStyle.isEmpty())
+		log("기본 스타일 템플릿 적용: " + appliedStyle);
 	m_project.save();
 	m_undoBaseline = m_project.toJson();
 	updateUndoButtons();
@@ -265,7 +286,11 @@ void EditorWindow::buildUi()
 	m_view->setFrameShape(QFrame::NoFrame);
 	m_view->setBackgroundBrush(QColor("#0B0B0D"));
 	m_view->setMinimumSize(300, 480);
+	m_view->viewport()->setMouseTracking(true);
+	m_view->viewport()->installEventFilter(this);
 	leftLay->addWidget(m_view, 1);
+	leftLay->addWidget(helpLabel("미리보기에서 자막이나 게임 화면을 위아래로 끌어 위치를 바꿀 수 있어요 · "
+				     "게임 화면 위에서 휠 = 확대/축소"));
 
 	auto *ctrl = new QHBoxLayout;
 	auto *homeBtn = new QPushButton("⏮");
@@ -308,7 +333,12 @@ void EditorWindow::buildUi()
 	cards->setParent(this);
 	cards->hide();
 	m_tabs->addTab(scrollable(buildExportTab()), "내보내기");
-	split->addWidget(m_tabs);
+	auto *rightPane = new QWidget;
+	auto *rightLay = new QVBoxLayout(rightPane);
+	rightLay->setContentsMargins(0, 0, 0, 0);
+	rightLay->addWidget(buildStyleBar());
+	rightLay->addWidget(m_tabs, 1);
+	split->addWidget(rightPane);
 	split->setStretchFactor(0, 1);
 	split->setSizes({600, 460});
 
@@ -568,6 +598,15 @@ QWidget *EditorWindow::buildMusicTab()
 	ff->addRow("게임 소리 볼륨", m_gameVol);
 	m_musicFade = new QCheckBox("끝날 때 음악 페이드 아웃");
 	ff->addRow(m_musicFade);
+	m_duck = new QCheckBox("게임 소리가 클 때 음악 자동으로 줄이기");
+	m_duck->setToolTip("킬 사운드나 스킬음처럼 게임 소리가 커지는 순간 음악을 잠깐 낮춰서 둘이 묻히지 않게 합니다");
+	m_duckStrength = new QComboBox;
+	m_duckStrength->addItems({"약하게", "보통", "강하게"});
+	auto *duckRow = new QHBoxLayout;
+	duckRow->addWidget(m_duck);
+	duckRow->addWidget(m_duckStrength);
+	duckRow->addStretch();
+	ff->addRow(duckRow);
 	lay->addWidget(fileBox);
 
 	auto *beatBox = new QGroupBox("비트");
@@ -638,6 +677,8 @@ QWidget *EditorWindow::buildMusicTab()
 	connect(m_musicVol, &QSlider::valueChanged, this, &EditorWindow::onMusicPropsChanged);
 	connect(m_gameVol, &QSlider::valueChanged, this, &EditorWindow::onMusicPropsChanged);
 	connect(m_musicFade, &QCheckBox::toggled, this, &EditorWindow::onMusicPropsChanged);
+	connect(m_duck, &QCheckBox::toggled, this, &EditorWindow::onMusicPropsChanged);
+	connect(m_duckStrength, &QComboBox::currentIndexChanged, this, &EditorWindow::onMusicPropsChanged);
 	connect(m_bpm, &QDoubleSpinBox::valueChanged, this, &EditorWindow::onMusicPropsChanged);
 	connect(m_firstBeat, &QDoubleSpinBox::valueChanged, this, &EditorWindow::onMusicPropsChanged);
 	connect(m_beatEvery, &QComboBox::currentIndexChanged, this, &EditorWindow::onMusicPropsChanged);
@@ -1041,6 +1082,289 @@ QWidget *EditorWindow::buildExportTab()
 	return w;
 }
 
+// ═════════════════════════════════════════════════════════════
+// 스타일 템플릿
+// ═════════════════════════════════════════════════════════════
+QWidget *EditorWindow::buildStyleBar()
+{
+	auto *bar = new QWidget;
+	auto *row = new QHBoxLayout(bar);
+	row->setContentsMargins(4, 2, 4, 2);
+	row->addWidget(new QLabel("🎨 스타일"));
+	m_styleCombo = new QComboBox;
+	m_styleCombo->setMinimumContentsLength(12);
+	m_styleCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+	m_styleCombo->setToolTip("저장해 둔 스타일 템플릿 (화면 구성, 자막 모양, 비트 효과, 소리 설정)");
+	auto *applyBtn = new QPushButton("적용");
+	auto *saveBtn = new QPushButton("현재 스타일 저장…");
+	auto *moreBtn = new QToolButton;
+	moreBtn->setText("⋯");
+	moreBtn->setToolTip("기본 스타일 지정 / 삭제");
+	row->addWidget(m_styleCombo, 1);
+	row->addWidget(applyBtn);
+	row->addWidget(saveBtn);
+	row->addWidget(moreBtn);
+	connect(applyBtn, &QPushButton::clicked, this, [this] { applyStyle(m_styleCombo->currentData().toString()); });
+	connect(saveBtn, &QPushButton::clicked, this, &EditorWindow::saveStyle);
+	connect(moreBtn, &QToolButton::clicked, this, &EditorWindow::showStyleMenu);
+	return bar;
+}
+
+void EditorWindow::refreshStyleList(const QString &select)
+{
+	const QString keep = select.isEmpty() ? m_styleCombo->currentData().toString() : select;
+	const QString def = StylePresets::defaultName();
+	m_styleCombo->blockSignals(true);
+	m_styleCombo->clear();
+	const QStringList names = StylePresets::names();
+	if (names.isEmpty())
+		m_styleCombo->addItem("(저장된 템플릿 없음)", QString());
+	for (const QString &n : names)
+		m_styleCombo->addItem(n == def ? "★ " + n + " (기본)" : n, n);
+	m_styleCombo->setCurrentIndex(std::max(0, m_styleCombo->findData(keep)));
+	m_styleCombo->blockSignals(false);
+}
+
+void EditorWindow::applyStyle(const QString &name)
+{
+	if (name.isEmpty()) {
+		log("먼저 '현재 스타일 저장…'으로 템플릿을 만들어 주세요");
+		return;
+	}
+	const QJsonObject preset = StylePresets::load(name);
+	if (preset.isEmpty()) {
+		log("스타일 템플릿을 읽지 못했습니다: " + name);
+		refreshStyleList();
+		return;
+	}
+	StylePresets::apply(preset, &m_project);
+	loadUiFromProject(true);
+	syncPlayers(position(), m_playing);
+	projectChanged();
+	log("스타일 템플릿 적용: " + name + " (Ctrl+Z로 되돌릴 수 있어요)");
+}
+
+void EditorWindow::saveStyle()
+{
+	QDialog dlg(this);
+	dlg.setWindowTitle("스타일 템플릿 저장");
+	auto *lay = new QVBoxLayout(&dlg);
+	lay->addWidget(new QLabel("템플릿 이름:"));
+	auto *name = new QLineEdit(m_styleCombo->currentData().toString());
+	name->setPlaceholderText("예: 내 채널 기본, 빨간 제목");
+	lay->addWidget(name);
+	auto *withText = new QCheckBox("제목 띠의 글씨 내용도 저장 (채널 이름처럼 매번 같은 문구일 때)");
+	auto *asDefault = new QCheckBox("새 영상을 만들 때 자동으로 적용 (기본 스타일)");
+	asDefault->setChecked(StylePresets::defaultName().isEmpty());
+	lay->addWidget(withText);
+	lay->addWidget(asDefault);
+	lay->addWidget(helpLabel("저장되는 것: 레이아웃, 제목 띠 색·글꼴·크기·높이·영상 확대/위치, 자막 모양(글꼴·크기·색·위치·박스), "
+				 "비트 효과, 음악/게임 볼륨과 자동 줄이기 설정.\n영상 구간, 자막 내용, 음악 파일은 저장되지 않아요."));
+	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
+	lay->addWidget(buttons);
+	connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+	connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+	name->selectAll();
+	if (dlg.exec() != QDialog::Accepted)
+		return;
+
+	const QString n = StylePresets::sanitizeName(name->text());
+	if (n.isEmpty()) {
+		log("템플릿 이름을 입력하세요");
+		return;
+	}
+	if (StylePresets::exists(n) &&
+	    QMessageBox::question(this, "스타일 템플릿 저장", "'" + n + "' 템플릿을 지금 스타일로 덮어쓸까요?") !=
+		    QMessageBox::Yes)
+		return;
+	QString err;
+	if (!StylePresets::save(n, StylePresets::capture(m_project, withText->isChecked()), &err)) {
+		log("템플릿 저장 실패: " + err);
+		return;
+	}
+	if (asDefault->isChecked())
+		StylePresets::setDefaultName(n);
+	refreshStyleList(n);
+	log("스타일 템플릿 저장: " + n + (asDefault->isChecked() ? " (새 영상에 자동 적용)" : ""));
+}
+
+void EditorWindow::showStyleMenu()
+{
+	const QString name = m_styleCombo->currentData().toString();
+	const bool isDefault = !name.isEmpty() && name == StylePresets::defaultName();
+	QMenu menu(this);
+	QAction *setDef = menu.addAction(isDefault ? "기본 스타일 해제" : "새 영상에 자동 적용 (기본 스타일로 지정)");
+	setDef->setEnabled(!name.isEmpty());
+	QAction *del = menu.addAction("이 템플릿 삭제");
+	del->setEnabled(!name.isEmpty());
+	menu.addSeparator();
+	QAction *folder = menu.addAction("템플릿 폴더 열기");
+	QAction *chosen = menu.exec(QCursor::pos());
+	if (chosen == setDef) {
+		StylePresets::setDefaultName(isDefault ? QString() : name);
+		refreshStyleList(name);
+		log(isDefault ? "기본 스타일을 해제했습니다" : "새 영상에 자동 적용: " + name);
+	} else if (chosen == del) {
+		if (QMessageBox::question(this, "스타일 템플릿 삭제", "'" + name + "' 템플릿을 삭제할까요?") !=
+		    QMessageBox::Yes)
+			return;
+		StylePresets::remove(name);
+		refreshStyleList();
+		log("스타일 템플릿 삭제: " + name);
+	} else if (chosen == folder) {
+		QDir().mkpath(StylePresets::dir());
+		QDesktopServices::openUrl(QUrl::fromLocalFile(StylePresets::dir()));
+	}
+}
+
+// ═════════════════════════════════════════════════════════════
+// 미리보기에서 끌어서 조정 (자막 세로 위치 / 제목 띠 레이아웃의 게임 화면 위치·확대)
+// ═════════════════════════════════════════════════════════════
+QSize EditorWindow::activeSourceSize() const
+{
+	if (m_activeSource >= 0 && m_activeSource < m_project.sources.size())
+		return m_project.sources[m_activeSource].size;
+	if (!m_project.sources.isEmpty())
+		return m_project.sources.first().size;
+	return {};
+}
+
+EditorWindow::DragKind EditorWindow::previewHit(const QPointF &p, int *subIndex) const
+{
+	// 위에 그려진 자막부터 확인
+	for (int i = int(m_subVisuals.size()) - 1; i >= 0; --i) {
+		const SubVisual &v = m_subVisuals[i];
+		if (!v.text || !v.text->isVisible())
+			continue;
+		const QRectF r = v.box && v.box->isVisible() ? v.box->sceneBoundingRect()
+							      : v.text->sceneBoundingRect().adjusted(-16, -16, 16, 16);
+		if (r.contains(p)) {
+			*subIndex = i;
+			return DragKind::Subtitle;
+		}
+	}
+	if (m_project.layout == ShortsLayout::TitleBands && !activeSourceSize().isEmpty() &&
+	    m_videoClip->sceneBoundingRect().contains(p) && !m_cardItem->isVisible())
+		return DragKind::Video;
+	return DragKind::None;
+}
+
+bool EditorWindow::eventFilter(QObject *obj, QEvent *e)
+{
+	if (!m_view || obj != m_view->viewport())
+		return QMainWindow::eventFilter(obj, e);
+
+	switch (e->type()) {
+	case QEvent::MouseButtonPress: {
+		auto *me = static_cast<QMouseEvent *>(e);
+		if (me->button() != Qt::LeftButton)
+			break;
+		const QPointF sp = m_view->mapToScene(me->position().toPoint());
+		int sub = -1;
+		const DragKind k = previewHit(sp, &sub);
+		if (k == DragKind::None)
+			break;
+		if (m_playing)
+			pause();
+		m_drag = k;
+		m_dragSub = sub;
+		m_dragStartY = sp.y();
+		m_dragMoved = false;
+		if (k == DragKind::Subtitle) {
+			selectSubtitle(sub);
+			m_tabs->setCurrentIndex(3);
+			m_dragStartValue = m_project.subtitles[sub].y;
+		} else {
+			m_tabs->setCurrentIndex(4);
+			m_dragStartValue = m_project.bands.offsetY;
+		}
+		return true;
+	}
+	case QEvent::MouseMove: {
+		auto *me = static_cast<QMouseEvent *>(e);
+		const QPointF sp = m_view->mapToScene(me->position().toPoint());
+		if (m_drag == DragKind::None) {
+			int sub = -1;
+			const DragKind k = previewHit(sp, &sub);
+			m_view->viewport()->setCursor(k == DragKind::None ? Qt::ArrowCursor : Qt::SizeVerCursor);
+			break;
+		}
+		const double dy = sp.y() - m_dragStartY;
+		if (std::abs(dy) > 2)
+			m_dragMoved = true;
+		if (!m_dragMoved)
+			return true;
+
+		if (m_drag == DragKind::Subtitle) {
+			if (m_dragSub < 0 || m_dragSub >= m_project.subtitles.size())
+				return true;
+			Subtitle &s = m_project.subtitles[m_dragSub];
+			const double y = std::clamp(std::round((m_dragStartValue + dy / kCanvasH) * 100.0) / 100.0, 0.05, 0.95);
+			if (std::abs(y - s.y) < 1e-6)
+				return true;
+			s.y = y;
+			m_project.subStyle.copyStyleFrom(s);
+			m_syncing = true;
+			m_subY->setValue(int(std::lround(y * 100)));
+			m_syncing = false;
+			rebuildSubtitleVisuals();
+			projectChanged();
+		} else {
+			// 아래로 끌면 영상이 따라 내려옴 (= 원본의 더 위쪽이 보임)
+			const QSize src = activeSourceSize();
+			const QRect c = m_project.bandCropRect(src);
+			const double free = (src.height() - c.height()) / 2.0;
+			if (free < 1.0)
+				return true; // 확대하지 않으면 위아래로 움직일 여유가 없음
+			const double srcPerScene = c.height() / double(std::max(2, m_project.bands.middleHeight()));
+			const double off = std::clamp(m_dragStartValue - dy * srcPerScene / free, -1.0, 1.0);
+			const double q = std::round(off * 100.0) / 100.0;
+			if (std::abs(q - m_project.bands.offsetY) < 1e-6)
+				return true;
+			m_project.bands.offsetY = q;
+			m_syncing = true;
+			m_bandOffset->setValue(int(std::lround(q * 100)));
+			m_syncing = false;
+			applyLayoutToPreview();
+			updateOverlays(position());
+			projectChanged();
+		}
+		return true;
+	}
+	case QEvent::MouseButtonRelease: {
+		auto *me = static_cast<QMouseEvent *>(e);
+		if (m_drag != DragKind::None && me->button() == Qt::LeftButton) {
+			m_drag = DragKind::None;
+			m_dragSub = -1;
+			return true;
+		}
+		break;
+	}
+	case QEvent::Wheel: {
+		auto *we = static_cast<QWheelEvent *>(e);
+		const QPointF sp = m_view->mapToScene(we->position().toPoint());
+		int sub = -1;
+		if (previewHit(sp, &sub) != DragKind::Video || we->angleDelta().y() == 0)
+			break;
+		const double step = we->angleDelta().y() > 0 ? 0.05 : -0.05;
+		const double z = std::clamp(std::round((m_project.bands.zoom + step) * 100.0) / 100.0, 1.0, 2.0);
+		if (std::abs(z - m_project.bands.zoom) > 1e-6) {
+			m_project.bands.zoom = z;
+			m_syncing = true;
+			m_bandZoom->setValue(int(std::lround(z * 100)));
+			m_syncing = false;
+			applyLayoutToPreview();
+			updateOverlays(position());
+			projectChanged();
+		}
+		return true;
+	}
+	default:
+		break;
+	}
+	return QMainWindow::eventFilter(obj, e);
+}
+
 void EditorWindow::setupShortcuts()
 {
 	auto add = [this](const QKeySequence &k, auto fn) {
@@ -1097,6 +1421,9 @@ void EditorWindow::loadUiFromProject(bool keepPosition)
 	m_musicVol->setValue(int(std::lround(m.volume * 100)));
 	m_gameVol->setValue(int(std::lround(m_project.gameVolume * 100)));
 	m_musicFade->setChecked(m.fadeOut);
+	m_duck->setChecked(m.duck);
+	m_duckStrength->setCurrentIndex(m.duckStrength);
+	m_duckStrength->setEnabled(m.duck);
 	m_bpm->setValue(m.bpm);
 	m_firstBeat->setValue(m.firstBeat);
 	m_beatEvery->setCurrentIndex(std::max(0, m_beatEvery->findData(m.beatEvery)));
@@ -1163,6 +1490,7 @@ void EditorWindow::createPlayerFor(int i)
 {
 	// 실행 취소로 클립이 빠졌다가 다시 추가되면 같은 번호의 플레이어를 재사용
 	m_thumbs->request(m_project.sources[i].path);
+	m_env->request(m_project.sources[i].path);
 	if (i < m_players.size()) {
 		SourcePlayer &sp = m_players[i];
 		sp.path = m_project.sources[i].path;
@@ -1378,6 +1706,21 @@ void EditorWindow::syncPlayers(double t, bool playing)
 		double vol = std::min(1.0, m_project.music.volume);
 		if (m_project.music.fadeOut && total > 3.0 && t > total - 1.5)
 			vol *= std::clamp((total - t) / 1.5, 0.0, 1.0);
+
+		// 덕킹 미리보기: 내보내기의 압축기와 같은 식으로 게임 소리 크기에 따라 음악을 줄임
+		double target = 1.0;
+		if (m_project.music.duck && wantSource >= 0) {
+			const double level = m_env->levelAt(m_project.sources[wantSource].path, loc.srcTime);
+			const double thr = m_project.music.duckThreshold();
+			const double key = level * m_project.gameVolume;
+			if (level >= 0 && key > thr)
+				target = std::pow(key / thr, 1.0 / m_project.music.duckRatio() - 1.0);
+		}
+		if (!playing)
+			m_duckGain = target;
+		else // 빨리 줄이고(어택) 천천히 돌아옴(릴리즈 약 0.4초)
+			m_duckGain += (target - m_duckGain) * (target < m_duckGain ? 0.6 : 0.05);
+		vol *= m_duckGain;
 		m_bgmAudio->setVolume(float(vol));
 
 		const qint64 expected = qint64((m_project.music.fileOffset + t) * 1000.0);
@@ -1920,6 +2263,9 @@ void EditorWindow::onMusicPropsChanged()
 	m.volume = m_musicVol->value() / 100.0;
 	m_project.gameVolume = m_gameVol->value() / 100.0;
 	m.fadeOut = m_musicFade->isChecked();
+	m.duck = m_duck->isChecked();
+	m.duckStrength = m_duckStrength->currentIndex();
+	m_duckStrength->setEnabled(m.duck);
 	m.bpm = m_bpm->value();
 	m.firstBeat = m_firstBeat->value();
 	m.beatEvery = m_beatEvery->currentData().toInt();
@@ -1967,14 +2313,7 @@ void EditorWindow::addSubtitle()
 		return;
 	const double t = position();
 	Subtitle s;
-	if (!m_project.subtitles.isEmpty()) {
-		const Subtitle &prev = m_project.subtitles.last();
-		s.fontSize = prev.fontSize;
-		s.color = prev.color;
-		s.y = prev.y;
-		s.box = prev.box;
-		s.font = prev.font;
-	}
+	s.copyStyleFrom(m_project.subStyle); // 마지막으로 고친 자막 모양 (또는 스타일 템플릿)
 	s.start = t;
 	s.end = std::min(t + 2.0, total);
 	if (s.end - s.start < 0.3)
@@ -2045,6 +2384,7 @@ void EditorWindow::onSubtitlePropsChanged()
 	s.y = m_subY->value() / 100.0;
 	s.box = m_subBox->isChecked();
 	s.font = m_subFont->currentData().toString();
+	m_project.subStyle.copyStyleFrom(s); // 다음에 추가하는 자막도 같은 모양으로
 
 	m_syncing = true;
 	if (QListWidgetItem *it = m_subList->item(i))

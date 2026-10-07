@@ -69,6 +69,11 @@ struct Subtitle {
 	double y = 0.72; // 0 = 위, 1 = 아래 (글자 중심)
 	bool box = true;
 	QString font;    // 글꼴 파일 경로 (빈 문자열 = 기본 맑은 고딕 Bold)
+
+	// 모양만 (크기/색/위치/박스/글꼴) — 스타일 템플릿과 새 자막 기본값에 사용
+	QJsonObject styleToJson() const;
+	void styleFromJson(const QJsonObject &o);
+	void copyStyleFrom(const Subtitle &o);
 };
 
 // 인트로/아웃트로 화면
@@ -89,6 +94,11 @@ struct MusicTrack {
 	double firstBeat = 0.0;  // 음악 파일 기준 첫 박 위치(초)
 	int beatEvery = 1;       // 1 = 매 박, 2 = 2박마다, 4 = 마디마다
 	bool fadeOut = true;
+	// 게임 소리가 클 때(킬, 스킬음) 음악을 자동으로 줄임
+	bool duck = false;
+	int duckStrength = 1; // 0 = 약하게, 1 = 보통, 2 = 강하게
+	double duckRatio() const { return duckStrength == 0 ? 3.0 : duckStrength == 1 ? 6.0 : 12.0; }
+	double duckThreshold() const { return duckStrength == 0 ? 0.08 : duckStrength == 1 ? 0.05 : 0.03; }
 };
 
 // 비트마다 화면이 툭 튀는 효과 (인트로/아웃트로 제외, 영상 구간에만)
@@ -128,6 +138,10 @@ struct TitleBands {
 	double offsetY = 0.0;   // 가운데 영상 세로 위치 (-1 = 위쪽, 0 = 가운데, 1 = 아래쪽)
 
 	int middleHeight() const { return 1920 - topHeight - bottomHeight; }
+
+	// withText = false 면 글씨 내용(제목/부제/아래 문구)은 빼고 모양만
+	QJsonObject toJson(bool withText = true) const;
+	void fromJson(const QJsonObject &o, bool withText = true);
 };
 
 struct EditProject {
@@ -144,6 +158,7 @@ struct EditProject {
 
 	ShortsLayout layout = ShortsLayout::TitleBands;
 	TitleBands bands;
+	Subtitle subStyle; // 새 자막의 기본 모양 (스타일 템플릿으로 바뀜)
 	// 제목 띠 레이아웃에서 원본 영상 중 가운데 영역으로 쓸 부분 (원본 픽셀, 짝수)
 	QRect bandCropRect(QSize source) const;
 	QRectF minimapRect{0.80, 0.63, 0.19, 0.35};

@@ -32,6 +32,9 @@ add_executable(ERShorts WIN32
   src/Diagnostics.h       src/Diagnostics.cpp
   src/BandLayout.h        src/BandLayout.cpp
   src/FontManager.h       src/FontManager.cpp
+  src/ClipInfoCache.h     src/ClipInfoCache.cpp
+  src/StylePresets.h      src/StylePresets.cpp
+  src/AudioEnvelope.h     src/AudioEnvelope.cpp
 )
 
 target_link_libraries(ERShorts PRIVATE

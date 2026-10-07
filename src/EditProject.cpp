@@ -372,6 +372,79 @@ static TitleCard cardFromJson(const QJsonObject &o)
 	return c;
 }
 
+// ── 자막 모양 ──
+QJsonObject Subtitle::styleToJson() const
+{
+	return QJsonObject{{"fontSize", fontSize}, {"color", color.name()}, {"y", y}, {"box", box}, {"font", font}};
+}
+
+void Subtitle::styleFromJson(const QJsonObject &j)
+{
+	fontSize = std::clamp(j.value("fontSize").toInt(72), 12, 300);
+	color = QColor(j.value("color").toString("#ffffff"));
+	y = std::clamp(j.value("y").toDouble(0.72), 0.0, 1.0);
+	box = j.value("box").toBool(true);
+	font = j.value("font").toString();
+}
+
+void Subtitle::copyStyleFrom(const Subtitle &o)
+{
+	fontSize = o.fontSize;
+	color = o.color;
+	y = o.y;
+	box = o.box;
+	font = o.font;
+}
+
+// ── 제목 띠 ──
+QJsonObject TitleBands::toJson(bool withText) const
+{
+	QJsonObject o{{"top", topHeight},
+		      {"bottom", bottomHeight},
+		      {"background", background.name()},
+		      {"titleSize", titleSize},
+		      {"titleColor", titleColor.name()},
+		      {"subtitleSize", subtitleSize},
+		      {"subtitleColor", subtitleColor.name()},
+		      {"bottomSize", bottomSize},
+		      {"bottomColor", bottomColor.name()},
+		      {"zoom", zoom},
+		      {"offsetY", offsetY},
+		      {"titleFont", titleFont},
+		      {"subtitleFont", subtitleFont},
+		      {"bottomFont", bottomFont}};
+	if (withText) {
+		o["title"] = title;
+		o["subtitle"] = subtitle;
+		o["bottomText"] = bottomText;
+	}
+	return o;
+}
+
+void TitleBands::fromJson(const QJsonObject &b, bool withText)
+{
+	const TitleBands def;
+	topHeight = std::clamp(b.value("top").toInt(def.topHeight), 0, 800) & ~1;
+	bottomHeight = std::clamp(b.value("bottom").toInt(def.bottomHeight), 0, 800) & ~1;
+	background = QColor(b.value("background").toString(def.background.name()));
+	titleSize = std::clamp(b.value("titleSize").toInt(def.titleSize), 20, 220);
+	titleColor = QColor(b.value("titleColor").toString(def.titleColor.name()));
+	subtitleSize = std::clamp(b.value("subtitleSize").toInt(def.subtitleSize), 20, 160);
+	subtitleColor = QColor(b.value("subtitleColor").toString(def.subtitleColor.name()));
+	bottomSize = std::clamp(b.value("bottomSize").toInt(def.bottomSize), 20, 160);
+	bottomColor = QColor(b.value("bottomColor").toString(def.bottomColor.name()));
+	zoom = std::clamp(b.value("zoom").toDouble(1.0), 1.0, 3.0);
+	offsetY = std::clamp(b.value("offsetY").toDouble(0.0), -1.0, 1.0);
+	titleFont = b.value("titleFont").toString();
+	subtitleFont = b.value("subtitleFont").toString();
+	bottomFont = b.value("bottomFont").toString();
+	if (withText) {
+		title = b.value("title").toString();
+		subtitle = b.value("subtitle").toString();
+		bottomText = b.value("bottomText").toString();
+	}
+}
+
 QJsonObject EditProject::toJson() const
 {
 	QJsonArray src;
@@ -396,7 +469,8 @@ QJsonObject EditProject::toJson() const
 	const QJsonObject mus{{"path", music.path},       {"fileOffset", music.fileOffset},
 			      {"volume", music.volume},   {"bpm", music.bpm},
 			      {"firstBeat", music.firstBeat}, {"beatEvery", music.beatEvery},
-			      {"fadeOut", music.fadeOut}};
+			      {"fadeOut", music.fadeOut},
+			      {"duck", music.duck},           {"duckStrength", music.duckStrength}};
 
 	return QJsonObject{
 		{"version", 2},
@@ -410,15 +484,8 @@ QJsonObject EditProject::toJson() const
 		{"beatFx", QJsonObject{{"zoom", beatFx.zoom}, {"shake", beatFx.shake},
 				       {"strength", beatFx.strength}, {"every", beatFx.every}}},
 		{"layout", int(layout)},
-		{"bands", QJsonObject{{"top", bands.topHeight}, {"bottom", bands.bottomHeight},
-				      {"background", bands.background.name()}, {"title", bands.title},
-				      {"titleSize", bands.titleSize}, {"titleColor", bands.titleColor.name()},
-				      {"subtitle", bands.subtitle}, {"subtitleSize", bands.subtitleSize},
-				      {"subtitleColor", bands.subtitleColor.name()}, {"bottomText", bands.bottomText},
-				      {"bottomSize", bands.bottomSize}, {"bottomColor", bands.bottomColor.name()},
-				      {"zoom", bands.zoom}, {"offsetY", bands.offsetY},
-				      {"titleFont", bands.titleFont}, {"subtitleFont", bands.subtitleFont},
-				      {"bottomFont", bands.bottomFont}}},
+		{"bands", bands.toJson()},
+		{"subStyle", subStyle.styleToJson()},
 		{"minimap", QJsonArray{minimapRect.x(), minimapRect.y(), minimapRect.width(), minimapRect.height()}},
 	};
 }
@@ -465,11 +532,7 @@ void EditProject::fromJson(const QJsonObject &o)
 		s.start = j.value("start").toDouble();
 		s.end = j.value("end").toDouble(s.start + 2.0);
 		s.text = j.value("text").toString();
-		s.fontSize = j.value("fontSize").toInt(72);
-		s.color = QColor(j.value("color").toString("#ffffff"));
-		s.y = std::clamp(j.value("y").toDouble(0.72), 0.0, 1.0);
-		s.box = j.value("box").toBool(true);
-		s.font = j.value("font").toString();
+		s.styleFromJson(j);
 		subtitles.push_back(s);
 	}
 
@@ -484,6 +547,8 @@ void EditProject::fromJson(const QJsonObject &o)
 	music.firstBeat = m.value("firstBeat").toDouble();
 	music.beatEvery = std::clamp(m.value("beatEvery").toInt(1), 1, 8);
 	music.fadeOut = m.value("fadeOut").toBool(true);
+	music.duck = m.value("duck").toBool(false);
+	music.duckStrength = std::clamp(m.value("duckStrength").toInt(1), 0, 2);
 
 	gameVolume = std::clamp(o.value("gameVolume").toDouble(1.0), 0.0, 2.0);
 	const QJsonObject fx = o.value("beatFx").toObject();
@@ -492,25 +557,13 @@ void EditProject::fromJson(const QJsonObject &o)
 	beatFx.strength = std::clamp(fx.value("strength").toInt(1), 0, 2);
 	beatFx.every = std::clamp(fx.value("every").toInt(1), 1, 8);
 	layout = ShortsLayout(std::clamp(o.value("layout").toInt(int(ShortsLayout::TitleBands)), 0, 3));
-	const QJsonObject b = o.value("bands").toObject();
-	const TitleBands def;
-	bands.topHeight = std::clamp(b.value("top").toInt(def.topHeight), 0, 800) & ~1;
-	bands.bottomHeight = std::clamp(b.value("bottom").toInt(def.bottomHeight), 0, 800) & ~1;
-	bands.background = QColor(b.value("background").toString(def.background.name()));
-	bands.title = b.value("title").toString();
-	bands.titleSize = std::clamp(b.value("titleSize").toInt(def.titleSize), 20, 220);
-	bands.titleColor = QColor(b.value("titleColor").toString(def.titleColor.name()));
-	bands.subtitle = b.value("subtitle").toString();
-	bands.subtitleSize = std::clamp(b.value("subtitleSize").toInt(def.subtitleSize), 20, 160);
-	bands.subtitleColor = QColor(b.value("subtitleColor").toString(def.subtitleColor.name()));
-	bands.bottomText = b.value("bottomText").toString();
-	bands.bottomSize = std::clamp(b.value("bottomSize").toInt(def.bottomSize), 20, 160);
-	bands.bottomColor = QColor(b.value("bottomColor").toString(def.bottomColor.name()));
-	bands.zoom = std::clamp(b.value("zoom").toDouble(1.0), 1.0, 3.0);
-	bands.offsetY = std::clamp(b.value("offsetY").toDouble(0.0), -1.0, 1.0);
-	bands.titleFont = b.value("titleFont").toString();
-	bands.subtitleFont = b.value("subtitleFont").toString();
-	bands.bottomFont = b.value("bottomFont").toString();
+	bands = TitleBands();
+	bands.fromJson(o.value("bands").toObject());
+	subStyle = Subtitle();
+	if (o.contains("subStyle"))
+		subStyle.styleFromJson(o.value("subStyle").toObject());
+	else if (!subtitles.isEmpty()) // 예전 프로젝트: 마지막 자막 모양을 기본으로
+		subStyle.copyStyleFrom(subtitles.last());
 	const QJsonArray mm = o.value("minimap").toArray();
 	if (mm.size() == 4)
 		minimapRect = QRectF(mm[0].toDouble(), mm[1].toDouble(), mm[2].toDouble(), mm[3].toDouble());

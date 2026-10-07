@@ -17,6 +17,8 @@ class QSpinBox;
 class EditorWindow;
 class GlobalHotkey;
 class PreviewWidget;
+class ClipInfoCache;
+class QListWidgetItem;
 
 class MainWindow : public QMainWindow {
 	Q_OBJECT
@@ -51,6 +53,17 @@ private:
 	QString shortsDir() const;
 	QString projectsDir() const;
 
+	// 클립 목록
+	QStringList selectedClipPaths() const; // 녹화된 순서(오래된 것 먼저)
+	void updateClipItem(QListWidgetItem *item);
+	void toggleFavorite();
+	void renameClip();
+	void deleteClips();
+	void showClipMenu(const QPoint &pos);
+	bool isFavorite(const QString &path) const;
+	void setFavorite(const QString &path, bool on);
+	void updateProjectsForRename(const QString &oldPath, const QString &newPath);
+
 	ObsCore *m_core = nullptr;
 	GlobalHotkey *m_hotkey = nullptr;
 
@@ -70,6 +83,9 @@ private:
 
 	// 클립
 	QListWidget *m_clips = nullptr;
+	QCheckBox *m_favOnly = nullptr;
+	ClipInfoCache *m_clipInfo = nullptr;
+	QStringList m_favorites; // 즐겨찾기한 클립 파일 이름
 
 	QPlainTextEdit *m_log = nullptr;
 	QString m_outputDir;

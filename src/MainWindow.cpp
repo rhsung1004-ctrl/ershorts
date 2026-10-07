@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "ClipInfoCache.h"
 #include "Diagnostics.h"
 #include "EditorWindow.h"
 #include "GlobalHotkey.h"
@@ -15,11 +16,18 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QInputDialog>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QMenu>
+#include <QShortcut>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QItemSelectionModel>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QProgressBar>
@@ -29,6 +37,10 @@
 #include <QSplitter>
 #include <QStandardPaths>
 #include <QTimer>
+#include <QPainter>
+#include <QPixmap>
+#include <QIcon>
+#include <QProcess>
 #include <QScreen>
 #include <QGuiApplication>
 #include <QUrl>
@@ -182,10 +194,45 @@ void MainWindow::buildUi()
 	connect(m_saveBtn, &QPushButton::clicked, this, &MainWindow::onSaveClip);
 
 	// 클립 목록
-	auto *clipBox = new QGroupBox("저장된 클립 (Ctrl/Shift로 여러 개 선택)");
+	auto *clipBox = new QGroupBox("저장된 클립 (Ctrl/Shift로 여러 개 선택, 우클릭 메뉴)");
 	auto *clipLay = new QVBoxLayout(clipBox);
+	m_clipInfo = new ClipInfoCache(this);
 	m_clips = new QListWidget;
 	m_clips->setSelectionMode(QAbstractItemView::ExtendedSelection);
+	m_clips->setIconSize(QSize(128, 72));
+	m_clips->setSpacing(2);
+	m_clips->setContextMenuPolicy(Qt::CustomContextMenu);
+	connect(m_clips, &QListWidget::customContextMenuRequested, this, &MainWindow::showClipMenu);
+	connect(m_clipInfo, &ClipInfoCache::ready, this, [this](const QString &path) {
+		for (int i = 0; i < m_clips->count(); ++i)
+			if (m_clips->item(i)->data(Qt::UserRole).toString() == path)
+				updateClipItem(m_clips->item(i));
+	});
+	auto *renameKey = new QShortcut(QKeySequence(Qt::Key_F2), m_clips);
+	renameKey->setContext(Qt::WidgetShortcut);
+	connect(renameKey, &QShortcut::activated, this, &MainWindow::renameClip);
+	auto *deleteKey = new QShortcut(QKeySequence(QKeySequence::Delete), m_clips);
+	deleteKey->setContext(Qt::WidgetShortcut);
+	connect(deleteKey, &QShortcut::activated, this, &MainWindow::deleteClips);
+
+	auto *manageRow = new QHBoxLayout;
+	auto *favBtn = new QPushButton("★ 즐겨찾기");
+	favBtn->setToolTip("선택한 클립을 즐겨찾기에 넣거나 뺍니다");
+	auto *renameBtn = new QPushButton("이름 바꾸기");
+	renameBtn->setToolTip("F2");
+	auto *deleteBtn = new QPushButton("삭제");
+	deleteBtn->setToolTip("휴지통으로 이동 (Delete)");
+	m_favOnly = new QCheckBox("★만 보기");
+	manageRow->addWidget(favBtn);
+	manageRow->addWidget(renameBtn);
+	manageRow->addWidget(deleteBtn);
+	manageRow->addStretch();
+	manageRow->addWidget(m_favOnly);
+	connect(favBtn, &QPushButton::clicked, this, &MainWindow::toggleFavorite);
+	connect(renameBtn, &QPushButton::clicked, this, &MainWindow::renameClip);
+	connect(deleteBtn, &QPushButton::clicked, this, &MainWindow::deleteClips);
+	connect(m_favOnly, &QCheckBox::toggled, this, &MainWindow::refreshClipList);
+
 	auto *editBtn = new QPushButton("🎬 선택한 클립으로 영상 만들기");
 	editBtn->setMinimumHeight(44);
 	auto *openProjBtn = new QPushButton("📂 저장된 프로젝트 열기");
@@ -221,6 +268,7 @@ void MainWindow::buildUi()
 			"어떤 정보도 외부로 보내지 않습니다.</small></p>");
 	});
 	clipLay->addWidget(m_clips);
+	clipLay->addLayout(manageRow);
 	clipLay->addWidget(editBtn);
 	clipLay->addWidget(openProjBtn);
 	clipLay->addLayout(clipBtns);
@@ -258,6 +306,10 @@ void MainWindow::loadSettings()
 	m_gameAudioOnly->setChecked(s.value("gameAudioOnly", true).toBool());
 	m_saveSound->setChecked(s.value("saveSound", false).toBool());
 	m_autoStart->setChecked(s.value("autoStart", true).toBool());
+	m_favorites = s.value("favoriteClips").toStringList();
+	m_favOnly->blockSignals(true);
+	m_favOnly->setChecked(s.value("favoriteOnly", false).toBool());
+	m_favOnly->blockSignals(false);
 	m_outputDir = s.value("outputDir",
 			      QStandardPaths::writableLocation(QStandardPaths::MoviesLocation) + "/ERShorts")
 			      .toString();
@@ -273,6 +325,8 @@ void MainWindow::saveSettings()
 	s.setValue("gameAudioOnly", m_gameAudioOnly->isChecked());
 	s.setValue("saveSound", m_saveSound->isChecked());
 	s.setValue("autoStart", m_autoStart->isChecked());
+	s.setValue("favoriteClips", m_favorites);
+	s.setValue("favoriteOnly", m_favOnly->isChecked());
 	s.setValue("outputDir", m_outputDir);
 }
 
@@ -344,27 +398,244 @@ void MainWindow::onReplayStateChanged(bool active)
 
 void MainWindow::refreshClipList()
 {
+	QStringList keepSel;
+	for (QListWidgetItem *it : m_clips->selectedItems())
+		keepSel << it->data(Qt::UserRole).toString();
+
 	m_clips->clear();
 	QDir dir(clipDir());
 	const QFileInfoList files =
 		dir.entryInfoList({"*.mp4", "*.mkv"}, QDir::Files, QDir::Time); // 최신순
 	for (const QFileInfo &fi : files) {
-		auto *item = new QListWidgetItem(
-			QString("%1   (%2 MB)").arg(fi.fileName()).arg(fi.size() / (1024.0 * 1024.0), 0, 'f', 1));
-		item->setData(Qt::UserRole, fi.absoluteFilePath());
+		const QString path = fi.absoluteFilePath();
+		if (m_favOnly->isChecked() && !isFavorite(path))
+			continue;
+		auto *item = new QListWidgetItem;
+		item->setData(Qt::UserRole, path);
+		item->setData(Qt::UserRole + 1, fi.lastModified().toMSecsSinceEpoch());
 		m_clips->addItem(item);
+		updateClipItem(item);
+		if (keepSel.contains(path))
+			item->setSelected(true);
 	}
+}
+
+void MainWindow::updateClipItem(QListWidgetItem *item)
+{
+	const QString path = item->data(Qt::UserRole).toString();
+	const QFileInfo fi(path);
+	ClipInfoCache::Info info;
+	const bool known = m_clipInfo->get(path, &info);
+
+	QString len = "…";
+	if (known && info.duration > 0) {
+		const int sec = int(info.duration + 0.5);
+		len = QString("%1:%2").arg(sec / 60).arg(sec % 60, 2, 10, QChar('0'));
+	} else if (known) {
+		len = "?";
+	}
+	const bool fav = isFavorite(path);
+	item->setText(QString("%1%2\n%3  ·  %4 MB  ·  %5")
+			      .arg(fav ? "★ " : "")
+			      .arg(fi.completeBaseName())
+			      .arg(len)
+			      .arg(fi.size() / (1024.0 * 1024.0), 0, 'f', 1)
+			      .arg(fi.lastModified().toString("MM/dd hh:mm")));
+	item->setToolTip(fi.fileName());
+	if (fav)
+		item->setForeground(QColor("#f5b400"));
+	else
+		item->setData(Qt::ForegroundRole, QVariant());
+
+	QPixmap pm(128, 72);
+	pm.fill(QColor(40, 40, 40));
+	if (!info.thumb.isNull()) {
+		QPainter p(&pm);
+		const QImage img = info.thumb.scaled(pm.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+		p.drawImage((pm.width() - img.width()) / 2, (pm.height() - img.height()) / 2, img);
+	}
+	item->setIcon(QIcon(pm));
+}
+
+bool MainWindow::isFavorite(const QString &path) const { return m_favorites.contains(QFileInfo(path).fileName()); }
+
+void MainWindow::setFavorite(const QString &path, bool on)
+{
+	const QString name = QFileInfo(path).fileName();
+	m_favorites.removeAll(name);
+	if (on)
+		m_favorites << name;
+	saveSettings();
+}
+
+QStringList MainWindow::selectedClipPaths() const
+{
+	// 녹화된 순서(오래된 것 먼저)대로
+	QList<QListWidgetItem *> items = m_clips->selectedItems();
+	std::sort(items.begin(), items.end(), [](QListWidgetItem *a, QListWidgetItem *b) {
+		return a->data(Qt::UserRole + 1).toLongLong() < b->data(Qt::UserRole + 1).toLongLong();
+	});
+	QStringList out;
+	for (QListWidgetItem *it : items)
+		out << it->data(Qt::UserRole).toString();
+	return out;
+}
+
+void MainWindow::toggleFavorite()
+{
+	const QList<QListWidgetItem *> items = m_clips->selectedItems();
+	if (items.isEmpty())
+		return;
+	// 하나라도 즐겨찾기가 아니면 전부 켜고, 전부 켜져 있으면 전부 끔
+	bool allFav = true;
+	for (QListWidgetItem *it : items)
+		allFav = allFav && isFavorite(it->data(Qt::UserRole).toString());
+	for (QListWidgetItem *it : items)
+		setFavorite(it->data(Qt::UserRole).toString(), !allFav);
+	if (m_favOnly->isChecked())
+		refreshClipList();
+	else
+		for (QListWidgetItem *it : items)
+			updateClipItem(it);
+}
+
+void MainWindow::renameClip()
+{
+	QListWidgetItem *item = m_clips->currentItem();
+	if (!item || !item->isSelected())
+		return;
+	const QString oldPath = item->data(Qt::UserRole).toString();
+	const QFileInfo fi(oldPath);
+	bool ok = false;
+	QString name = QInputDialog::getText(this, "클립 이름 바꾸기", "새 이름:", QLineEdit::Normal,
+					     fi.completeBaseName(), &ok)
+			       .trimmed();
+	if (!ok || name.isEmpty() || name == fi.completeBaseName())
+		return;
+	static const QString bad = "\\/:*?\"<>|";
+	for (QChar c : bad)
+		name.remove(c);
+	if (name.isEmpty())
+		return;
+	const QString newPath = fi.absolutePath() + "/" + name + "." + fi.suffix();
+	if (QFileInfo::exists(newPath)) {
+		QMessageBox::warning(this, "이름 바꾸기", "같은 이름의 클립이 이미 있어요.");
+		return;
+	}
+	const bool fav = isFavorite(oldPath);
+	m_clipInfo->cancelAll(); // 목록용 장면 추출이 파일을 붙잡고 있지 않게
+	if (!QFile::rename(oldPath, newPath)) {
+		QMessageBox::warning(this, "이름 바꾸기",
+				     "이름을 바꾸지 못했어요. 다른 프로그램(플레이어, 편집 창)에서 열려 있는지 확인하세요.");
+		return;
+	}
+	if (fav) {
+		setFavorite(oldPath, false);
+		setFavorite(newPath, true);
+	}
+	updateProjectsForRename(oldPath, newPath); // 저장된 프로젝트가 계속 이 클립을 찾을 수 있게
+	log("클립 이름 변경: " + fi.fileName() + " → " + QFileInfo(newPath).fileName());
+	m_clips->clearSelection();
+	refreshClipList();
+	for (int i = 0; i < m_clips->count(); ++i)
+		if (m_clips->item(i)->data(Qt::UserRole).toString() == QFileInfo(newPath).absoluteFilePath()) {
+			m_clips->setCurrentRow(i);
+			break;
+		}
+}
+
+void MainWindow::updateProjectsForRename(const QString &oldPath, const QString &newPath)
+{
+	const QString oldAbs = QDir::cleanPath(QFileInfo(oldPath).absoluteFilePath());
+	const QString newAbs = QDir::cleanPath(QFileInfo(newPath).absoluteFilePath());
+	const QFileInfoList projects = QDir(projectsDir()).entryInfoList({"*.json"}, QDir::Files);
+	for (const QFileInfo &pf : projects) {
+		QFile f(pf.absoluteFilePath());
+		if (!f.open(QIODevice::ReadOnly))
+			continue;
+		QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+		f.close();
+		if (!doc.isObject())
+			continue;
+		QJsonObject root = doc.object();
+		QJsonArray sources = root.value("sources").toArray();
+		bool changed = false;
+		for (int i = 0; i < sources.size(); ++i) {
+			QJsonObject src = sources[i].toObject();
+			if (QDir::cleanPath(src.value("path").toString()).compare(oldAbs, Qt::CaseInsensitive) == 0) {
+				src["path"] = newAbs;
+				sources[i] = src;
+				changed = true;
+			}
+		}
+		if (!changed)
+			continue;
+		root["sources"] = sources;
+		if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+			f.write(QJsonDocument(root).toJson());
+	}
+}
+
+void MainWindow::deleteClips()
+{
+	const QStringList paths = selectedClipPaths();
+	if (paths.isEmpty())
+		return;
+	const QString what = paths.size() == 1 ? QFileInfo(paths.first()).fileName()
+					       : QString("클립 %1개").arg(paths.size());
+	if (QMessageBox::question(this, "클립 삭제",
+				  what + "를 휴지통으로 옮길까요?\n(휴지통에서 되살릴 수 있어요. 이 클립을 쓰는 "
+					 "프로젝트는 해당 구간이 빠지게 됩니다.)") != QMessageBox::Yes)
+		return;
+	m_clipInfo->cancelAll(); // 목록용 장면 추출이 파일을 붙잡고 있지 않게
+	int done = 0;
+	for (const QString &p : paths) {
+		if (QFile::moveToTrash(p)) {
+			setFavorite(p, false);
+			++done;
+		} else {
+			log("삭제 실패 (다른 프로그램에서 열려 있을 수 있음): " + QFileInfo(p).fileName());
+		}
+	}
+	if (done > 0)
+		log(QString("클립 %1개를 휴지통으로 옮겼습니다").arg(done));
+	m_clips->clearSelection();
+	refreshClipList();
+}
+
+void MainWindow::showClipMenu(const QPoint &pos)
+{
+	QListWidgetItem *item = m_clips->itemAt(pos);
+	if (!item)
+		return;
+	if (!item->isSelected()) {
+		m_clips->clearSelection();
+		item->setSelected(true);
+	}
+	m_clips->setCurrentItem(item, QItemSelectionModel::NoUpdate);
+	const QString path = item->data(Qt::UserRole).toString();
+	const bool multi = m_clips->selectedItems().size() > 1;
+
+	QMenu menu(this);
+	menu.addAction("🎬 영상 만들기", this, &MainWindow::openEditor);
+	if (!multi)
+		menu.addAction("재생", this, [path] { QDesktopServices::openUrl(QUrl::fromLocalFile(path)); });
+	menu.addSeparator();
+	menu.addAction(isFavorite(path) ? "☆ 즐겨찾기 해제" : "★ 즐겨찾기", this, &MainWindow::toggleFavorite);
+	if (!multi)
+		menu.addAction("이름 바꾸기 (F2)", this, &MainWindow::renameClip);
+	if (!multi)
+		menu.addAction("폴더에서 보기", this, [path] {
+			QProcess::startDetached("explorer.exe", {"/select,", QDir::toNativeSeparators(path)});
+		});
+	menu.addSeparator();
+	menu.addAction("휴지통으로 삭제 (Delete)", this, &MainWindow::deleteClips);
+	menu.exec(m_clips->viewport()->mapToGlobal(pos));
 }
 
 void MainWindow::openEditor()
 {
-	// 목록은 최신순이므로, 영상에는 녹화된 순서(오래된 것 먼저)대로 넣음
-	QStringList clips;
-	for (int row = m_clips->count() - 1; row >= 0; --row) {
-		QListWidgetItem *it = m_clips->item(row);
-		if (it->isSelected())
-			clips << it->data(Qt::UserRole).toString();
-	}
+	const QStringList clips = selectedClipPaths();
 	if (clips.isEmpty()) {
 		log("영상에 넣을 클립을 먼저 선택하세요 (Ctrl/Shift로 여러 개)");
 		return;

@@ -352,14 +352,26 @@ QString ShortsExporter::buildFilter()
 
 	// ── 4) 게임 소리 + BGM ────────────────────────────
 	const double total = p.totalDuration();
-	g << QString("[alla]volume=%1[game]").arg(num(p.gameVolume));
+	const bool duck = m_bgmInput >= 0 && p.music.duck;
+	if (duck) // 게임 소리를 하나 더 갈라서 음악을 줄이는 신호로 사용
+		g << QString("[alla]volume=%1,asplit=2[game][duckkey]").arg(num(p.gameVolume));
+	else
+		g << QString("[alla]volume=%1[game]").arg(num(p.gameVolume));
 	if (m_bgmInput >= 0) {
 		QString b = QString("[%1:a]atrim=start=%2,asetpts=PTS-STARTPTS,volume=%3,%4")
 				    .arg(m_bgmInput)
 				    .arg(num(p.music.fileOffset), num(p.music.volume), kAudioFmt);
 		if (p.music.fadeOut && total > 3.0)
 			b += QString(",afade=t=out:st=%1:d=1.5").arg(num(total - 1.5));
-		g << b + "[bgm]";
+		if (duck) {
+			g << b + "[bgmraw]";
+			// 게임 소리가 기준보다 크면 음악을 압축(줄임), 작아지면 0.4초에 걸쳐 돌아옴
+			g << QString("[bgmraw][duckkey]sidechaincompress=threshold=%1:ratio=%2:attack=15:release=400:"
+				     "makeup=1:detection=rms[bgm]")
+				     .arg(num(p.music.duckThreshold()), num(p.music.duckRatio()));
+		} else {
+			g << b + "[bgm]";
+		}
 		g << "[game][bgm]amix=inputs=2:duration=first:normalize=0[aout]";
 	} else {
 		g << "[game]anull[aout]";

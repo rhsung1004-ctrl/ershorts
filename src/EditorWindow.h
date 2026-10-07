@@ -29,6 +29,7 @@ class QSlider;
 class QSpinBox;
 class QTabWidget;
 class QTimer;
+class AudioEnvelope;
 class BeatDetector;
 class ShortsExporter;
 class TimelineWidget;
@@ -49,6 +50,7 @@ public:
 
 protected:
 	void closeEvent(QCloseEvent *e) override;
+	bool eventFilter(QObject *obj, QEvent *e) override; // 미리보기 드래그
 
 private:
 	// ── UI ──
@@ -68,7 +70,19 @@ private:
 	void setFontComboValue(QComboBox *combo, const QString &path);
 	bool handleFontComboAdd(QComboBox *combo); // "＋ 글꼴 추가…" 선택 시 true
 	QWidget *buildExportTab();
+	QWidget *buildStyleBar();
 	void setupShortcuts();
+
+	// ── 스타일 템플릿 ──
+	void refreshStyleList(const QString &select = {});
+	void applyStyle(const QString &name);
+	void saveStyle();
+	void showStyleMenu();
+
+	// ── 미리보기에서 직접 끌어서 조정 ──
+	enum class DragKind { None, Subtitle, Video };
+	DragKind previewHit(const QPointF &scenePos, int *subIndex) const;
+	QSize activeSourceSize() const;
 	void loadUiFromProject(bool keepPosition = false);
 
 	// ── 실행 취소 / 다시 실행 (프로젝트 전체 스냅샷) ──
@@ -173,6 +187,16 @@ private:
 	QTimer *m_saveTimer = nullptr;
 	ShortsExporter *m_exporter = nullptr;
 	BeatDetector *m_beats = nullptr;
+	AudioEnvelope *m_env = nullptr; // 미리보기 덕킹용 게임 소리 크기
+	double m_duckGain = 1.0;
+
+	DragKind m_drag = DragKind::None;
+	int m_dragSub = -1;
+	double m_dragStartY = 0.0;     // 장면 좌표
+	double m_dragStartValue = 0.0; // 자막 y 또는 영상 offsetY
+	bool m_dragMoved = false;
+
+	QComboBox *m_styleCombo = nullptr;
 
 	// 미리보기
 	QGraphicsView *m_view = nullptr;
@@ -230,6 +254,8 @@ private:
 	QComboBox *m_fxBeatStrength = nullptr;
 	QComboBox *m_fxBeatEvery = nullptr;
 	QPushButton *m_detectBtn = nullptr;
+	QCheckBox *m_duck = nullptr;
+	QComboBox *m_duckStrength = nullptr;
 
 	// 자막 탭
 	QListWidget *m_subList = nullptr;
