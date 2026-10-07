@@ -39,7 +39,22 @@ struct Segment {
 	bool vivid = false;    // 색감 강조 + 선명
 	bool vignette = false; // 가장자리 어둡게
 
-	double outDuration() const { return out > in ? (out - in) / speed : 0.0; }
+	// 속도 램프: 1x 에서 speed 로 부드럽게 들어가고(rampIn) / speed 에서 1x 로 빠져나옴(rampOut)
+	bool rampIn = false;
+	bool rampOut = false;
+	double rampLen = 0.5; // 램프 구간 길이 (원본 영상 기준 초)
+
+	// ── 시간 변환 (x = 구간 시작부터의 원본 시간, t = 구간 시작부터의 결과 시간) ──
+	double srcLength() const { return out > in ? out - in : 0.0; }
+	bool hasRamp() const;
+	void rampLengths(double *ra, double *rb) const;
+	double srcToOut(double x) const;
+	double outToSrc(double t) const;
+	double speedAt(double x) const;
+	double outDuration() const { return srcToOut(srcLength()); }
+	// 결과 길이가 target 이 되도록 하는 원본 길이 (길이 조절/비트 맞춤용)
+	double srcLengthForOutDuration(double target, double maxSrc) const;
+
 	QStringList effectNames() const;
 };
 

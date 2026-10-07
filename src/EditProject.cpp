@@ -22,6 +22,98 @@ QString transitionName(Transition t)
 	return {};
 }
 
+// ─── 속도 램프 계산 ──────────────────────────────────────
+// 램프 구간에서는 속도가 직선으로 변함: v(x) = 1 + (S-1)·x/Ra
+// 결과 시간 = ∫ dx / v(x) = Ra/(S-1) · ln(v)  (닫힌 식이라 ffmpeg setpts 수식으로도 그대로 씀)
+bool Segment::hasRamp() const
+{
+	double ra = 0, rb = 0;
+	rampLengths(&ra, &rb);
+	return ra > 0 || rb > 0;
+}
+
+void Segment::rampLengths(double *ra, double *rb) const
+{
+	*ra = *rb = 0.0;
+	if (std::abs(speed - 1.0) < 1e-3)
+		return;
+	const double L = srcLength();
+	const double lim = (rampIn && rampOut) ? L / 2 : L;
+	if (rampIn)
+		*ra = std::min(rampLen, lim);
+	if (rampOut)
+		*rb = std::min(rampLen, lim);
+}
+
+double Segment::srcToOut(double x) const
+{
+	const double L = srcLength();
+	const double S = speed;
+	x = std::clamp(x, 0.0, L);
+	double Ra, Rb;
+	rampLengths(&Ra, &Rb);
+	if (Ra <= 0 && Rb <= 0)
+		return x / S;
+
+	const double TA = Ra > 0 ? Ra / (S - 1) * std::log(S) : 0.0;
+	if (x < Ra)
+		return Ra / (S - 1) * std::log(1 + (S - 1) * x / Ra);
+	const double H = L - Ra - Rb;
+	if (x < L - Rb || Rb <= 0)
+		return TA + (x - Ra) / S;
+	const double y = x - (L - Rb);
+	return TA + H / S + Rb / (1 - S) * std::log((S + (1 - S) * y / Rb) / S);
+}
+
+double Segment::outToSrc(double t) const
+{
+	const double L = srcLength();
+	const double S = speed;
+	if (t <= 0)
+		return 0.0;
+	double Ra, Rb;
+	rampLengths(&Ra, &Rb);
+	if (Ra <= 0 && Rb <= 0)
+		return std::min(L, t * S);
+
+	const double TA = Ra > 0 ? Ra / (S - 1) * std::log(S) : 0.0;
+	const double H = L - Ra - Rb;
+	if (t < TA)
+		return Ra / (S - 1) * (std::exp(t * (S - 1) / Ra) - 1);
+	if (t < TA + H / S || Rb <= 0)
+		return std::min(L, Ra + (t - TA) * S);
+	const double v = S * std::exp((t - TA - H / S) * (1 - S) / Rb);
+	return std::min(L, L - Rb + (v - S) * Rb / (1 - S));
+}
+
+double Segment::speedAt(double x) const
+{
+	double Ra, Rb;
+	rampLengths(&Ra, &Rb);
+	const double L = srcLength();
+	if (Ra > 0 && x < Ra)
+		return 1 + (speed - 1) * std::max(0.0, x) / Ra;
+	if (Rb > 0 && x > L - Rb)
+		return speed + (1 - speed) * std::min(Rb, x - (L - Rb)) / Rb;
+	return speed;
+}
+
+double Segment::srcLengthForOutDuration(double target, double maxSrc) const
+{
+	// 결과 길이는 원본 길이에 대해 증가함수 → 이분 탐색
+	Segment probe = *this;
+	double lo = 0.05, hi = std::max(lo, maxSrc);
+	probe.out = probe.in + hi;
+	if (probe.outDuration() <= target)
+		return hi;
+	for (int i = 0; i < 60; ++i) {
+		const double mid = (lo + hi) / 2;
+		probe.out = probe.in + mid;
+		(probe.outDuration() < target ? lo : hi) = mid;
+	}
+	return (lo + hi) / 2;
+}
+
 QStringList Segment::effectNames() const
 {
 	QStringList n;
@@ -30,6 +122,8 @@ QStringList Segment::effectNames() const
 	if (gray) n << "흑백";
 	if (vivid) n << "선명";
 	if (vignette) n << "비네팅";
+	if (hasRamp())
+		n << QStringLiteral("램프") + (rampIn ? QStringLiteral("↘") : QString()) + (rampOut ? QStringLiteral("↗") : QString());
 	return n;
 }
 
@@ -108,7 +202,7 @@ EditProject::Locate EditProject::locate(double t) const
 			r.kind = Locate::Segment;
 			r.seg = i;
 			r.local = t - acc;
-			r.srcTime = segments[i].in + r.local * segments[i].speed;
+			r.srcTime = segments[i].in + segments[i].outToSrc(r.local);
 			return r;
 		}
 		acc += d;
@@ -131,7 +225,9 @@ bool EditProject::splitAt(double t)
 	Segment right = s;
 	right.in = loc.srcTime;
 	right.transIn = Transition::None;
+	right.rampIn = false; // 램프는 바깥쪽 끝에만 남김
 	s.out = loc.srcTime;
+	s.rampOut = false;
 	segments.insert(loc.seg + 1, right);
 	return true;
 }
@@ -191,18 +287,22 @@ int EditProject::snapCutsToBeats()
 		const double end = start + s.outDuration();
 		const double srcMax = sources.value(s.source).duration > 0 ? sources[s.source].duration : s.out;
 
+		const double maxSrc = srcMax - s.in;
+		Segment full = s;
+		full.out = srcMax;
+		const double maxOutDur = full.outDuration();
+
 		double best = -1.0;
 		for (double b : beats) {
 			if (b - start < 0.25) // 너무 짧은 컷 방지
 				continue;
-			const double newOut = s.in + (b - start) * s.speed;
-			if (newOut > srcMax + 1e-6)
+			if (b - start > maxOutDur + 1e-6)
 				break;
 			if (best < 0 || std::abs(b - end) < std::abs(best - end))
 				best = b;
 		}
 		if (best >= 0 && std::abs(best - end) > 0.005) {
-			s.out = s.in + (best - start) * s.speed;
+			s.out = s.in + s.srcLengthForOutDuration(best - start, maxSrc);
 			++changed;
 		}
 	}
@@ -241,7 +341,8 @@ QJsonObject EditProject::toJson() const
 		segs.append(QJsonObject{
 			{"source", s.source}, {"in", s.in}, {"out", s.out}, {"speed", s.speed},
 			{"transIn", int(s.transIn)}, {"zoom", s.zoom}, {"shake", s.shake}, {"gray", s.gray},
-			{"vivid", s.vivid}, {"vignette", s.vignette}});
+			{"vivid", s.vivid}, {"vignette", s.vignette}, {"rampIn", s.rampIn},
+			{"rampOut", s.rampOut}, {"rampLen", s.rampLen}});
 
 	QJsonArray subs;
 	for (const Subtitle &s : subtitles)
@@ -297,6 +398,9 @@ void EditProject::fromJson(const QJsonObject &o)
 		s.gray = j.value("gray").toBool();
 		s.vivid = j.value("vivid").toBool();
 		s.vignette = j.value("vignette").toBool();
+		s.rampIn = j.value("rampIn").toBool();
+		s.rampOut = j.value("rampOut").toBool();
+		s.rampLen = std::clamp(j.value("rampLen").toDouble(0.5), 0.1, 3.0);
 		segments.push_back(s);
 	}
 

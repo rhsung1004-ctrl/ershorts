@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QElapsedTimer>
+#include <QJsonObject>
 #include <QMainWindow>
 #include <QVector>
 
@@ -58,7 +59,14 @@ private:
 	QWidget *buildCardTab();
 	QWidget *buildExportTab();
 	void setupShortcuts();
-	void loadUiFromProject();
+	void loadUiFromProject(bool keepPosition = false);
+
+	// ── 실행 취소 / 다시 실행 (프로젝트 전체 스냅샷) ──
+	void commitUndoStep();
+	void undo();
+	void redo();
+	void restoreSnapshot(const QJsonObject &snapshot);
+	void updateUndoButtons();
 
 	// ── 클립 / 플레이어 ──
 	void createPlayerFor(int sourceIndex);
@@ -132,12 +140,20 @@ private:
 		QMediaPlayer *player = nullptr;
 		QAudioOutput *audio = nullptr;
 		QGraphicsVideoItem *item = nullptr;
+		QString path; // 현재 열려 있는 파일 (실행 취소로 클립 구성이 바뀔 때 비교용)
 	};
 	QVector<SourcePlayer> m_players;
 	QMediaPlayer *m_bgm = nullptr;
 	QAudioOutput *m_bgmAudio = nullptr;
 
 	QTimer *m_tickTimer = nullptr;
+	QTimer *m_undoTimer = nullptr;
+	QVector<QJsonObject> m_undoStack;
+	QVector<QJsonObject> m_redoStack;
+	QJsonObject m_undoBaseline; // 마지막으로 기록된 상태
+	bool m_restoring = false;
+	QPushButton *m_undoBtn = nullptr;
+	QPushButton *m_redoBtn = nullptr;
 	QTimer *m_saveTimer = nullptr;
 	ShortsExporter *m_exporter = nullptr;
 	BeatDetector *m_beats = nullptr;
@@ -173,6 +189,8 @@ private:
 	QComboBox *m_segTrans = nullptr;
 	QCheckBox *m_fxZoom = nullptr, *m_fxShake = nullptr, *m_fxGray = nullptr, *m_fxVivid = nullptr,
 		  *m_fxVignette = nullptr;
+	QCheckBox *m_rampIn = nullptr, *m_rampOut = nullptr;
+	QDoubleSpinBox *m_rampLen = nullptr;
 
 	// 음악 탭
 	QLabel *m_musicFile = nullptr;

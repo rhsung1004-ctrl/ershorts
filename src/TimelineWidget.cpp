@@ -367,7 +367,9 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent *e)
 		}
 		const double srcMax = m_p->sources.value(s.source).duration > 0 ? m_p->sources[s.source].duration
 										   : s.out;
-		s.out = std::clamp(s.in + (t - start) * s.speed, s.in + 0.2 * s.speed, srcMax);
+		// 속도 램프가 있어도 "끈 위치 = 구간 끝"이 되도록 원본 길이를 역산
+		const double len = s.srcLengthForOutDuration(std::max(0.1, t - start), srcMax - s.in);
+		s.out = std::clamp(s.in + len, s.in + 0.1, srcMax);
 		emit seekRequested(std::max(start, start + s.outDuration() - 0.03));
 		update();
 		break;

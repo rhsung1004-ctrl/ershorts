@@ -5,7 +5,9 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QMap>
+#include <QPair>
 #include <QRegularExpression>
+#include <QVector>
 
 #include <algorithm>
 #include <cmath>
@@ -41,6 +43,59 @@ QString atempoChain(double speed)
 }
 
 const QString kAudioFmt = "aformat=sample_rates=48000:channel_layouts=stereo";
+
+QString n6(double v) { return QString::number(v, 'f', 6); }
+
+// 구간의 시간 늘이기/줄이기. 속도 램프가 있으면 Segment::srcToOut 과 같은 식을 ffmpeg 수식으로 씀
+QString segmentSetpts(const Segment &s)
+{
+	double Ra, Rb;
+	s.rampLengths(&Ra, &Rb);
+	const double S = s.speed;
+	if (Ra <= 0 && Rb <= 0)
+		return QString("setpts=(PTS-STARTPTS)/%1").arg(num(S));
+
+	const double L = s.srcLength();
+	const double TA = Ra > 0 ? Ra / (S - 1) * std::log(S) : 0.0;
+	const double H = L - Ra - Rb;
+	const QString X = "(PTS-STARTPTS)*TB"; // 구간 시작부터의 원본 시간(초)
+	const QString a = Ra > 0 ? QString("%1/(%2)*log(1+(%2)*%3/%1)").arg(n6(Ra), n6(S - 1), X) : QString("0");
+	const QString m = QString("%1+(%2-%3)/%4").arg(n6(TA), X, n6(Ra), n6(S));
+	const QString b = Rb > 0 ? QString("%1+%2/(%3)*log((%4+(%3)*(%5-%6)/%2)/%4)")
+					   .arg(n6(TA + H / S), n6(Rb), n6(1 - S), n6(S), X, n6(L - Rb))
+				 : m;
+	return QString("setpts='if(lt(%1,%2),%3,if(lt(%1,%4),%5,%6))/TB'").arg(X, n6(Ra), a, n6(L - Rb), m, b);
+}
+
+// 속도 램프 구간의 소리: atempo는 시간에 따라 못 바꾸므로 작은 조각으로 나눠 조각마다 평균 속도 적용
+QVector<QPair<double, double>> rampAudioChunks(const Segment &s, QVector<double> *speeds)
+{
+	constexpr int K = 8;
+	double Ra, Rb;
+	s.rampLengths(&Ra, &Rb);
+	const double L = s.srcLength();
+	QVector<double> pts{0.0};
+	if (Ra > 0)
+		for (int k = 1; k <= K; ++k)
+			pts << Ra * k / K;
+	if (L - Rb > pts.last() + 1e-6)
+		pts << L - Rb;
+	if (Rb > 0)
+		for (int k = 1; k <= K; ++k)
+			pts << L - Rb + Rb * k / K;
+	if (pts.last() < L - 1e-6)
+		pts << L;
+
+	QVector<QPair<double, double>> chunks;
+	for (int k = 0; k + 1 < pts.size(); ++k) {
+		const double x0 = pts[k], x1 = pts[k + 1];
+		if (x1 - x0 < 1e-4)
+			continue;
+		chunks.push_back({x0, x1});
+		speeds->push_back((x1 - x0) / (s.srcToOut(x1) - s.srcToOut(x0)));
+	}
+	return chunks;
+}
 constexpr double kDip = 0.15; // 블랙 페이드 절반 길이
 } // namespace
 
@@ -112,9 +167,7 @@ QString ShortsExporter::buildFilter()
 		const double exactDur = frames / 60.0;
 		const bool nextDips = (i + 1 < p.segments.size() && p.segments[i + 1].transIn == Transition::BlackDip);
 
-		QString v = QString("[%1:v]trim=start=%2:end=%3,setpts=(PTS-STARTPTS)/%4")
-				    .arg(in)
-				    .arg(num(s.in), num(s.out), num(s.speed));
+		QString v = QString("[%1:v]trim=start=%2:end=%3,").arg(in).arg(num(s.in), num(s.out)) + segmentSetpts(s);
 		if (s.zoom)
 			v += ",crop=iw/1.3:ih/1.3";
 		if (s.shake)
@@ -156,7 +209,23 @@ QString ShortsExporter::buildFilter()
 		g << v + QString("[v%1]").arg(i);
 
 		QString a;
-		if (src.hasAudio) {
+		if (src.hasAudio && s.hasRamp()) {
+			QVector<double> speeds;
+			const auto chunks = rampAudioChunks(s, &speeds);
+			QString labels;
+			for (int k = 0; k < chunks.size(); ++k) {
+				QString c = QString("[%1:a]atrim=start=%2:end=%3,asetpts=PTS-STARTPTS")
+						    .arg(in)
+						    .arg(n6(s.in + chunks[k].first), n6(s.in + chunks[k].second));
+				const QString tempo = atempoChain(speeds[k]);
+				if (!tempo.isEmpty())
+					c += "," + tempo;
+				g << c + QString("[a%1_%2]").arg(i).arg(k);
+				labels += QString("[a%1_%2]").arg(i).arg(k);
+			}
+			a = labels + QString("concat=n=%1:v=0:a=1,").arg(chunks.size()) + kAudioFmt +
+			    QString(",apad=whole_dur=%1,atrim=end=%1").arg(num(exactDur));
+		} else if (src.hasAudio) {
 			a = QString("[%1:a]atrim=start=%2:end=%3,asetpts=PTS-STARTPTS").arg(in).arg(num(s.in), num(s.out));
 			const QString tempo = atempoChain(s.speed);
 			if (!tempo.isEmpty())

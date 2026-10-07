@@ -130,6 +130,12 @@ EditorWindow::EditorWindow(const QString &projectPath, const QStringList &newCli
 	m_tickTimer->setInterval(20);
 	connect(m_tickTimer, &QTimer::timeout, this, &EditorWindow::tick);
 
+	// 연속 입력(드래그, 글자 입력)은 0.4초 동안 묶어서 실행 취소 한 단계로 기록
+	m_undoTimer = new QTimer(this);
+	m_undoTimer->setSingleShot(true);
+	m_undoTimer->setInterval(400);
+	connect(m_undoTimer, &QTimer::timeout, this, &EditorWindow::commitUndoStep);
+
 	m_saveTimer = new QTimer(this);
 	m_saveTimer->setSingleShot(true);
 	m_saveTimer->setInterval(800);
@@ -169,6 +175,8 @@ EditorWindow::EditorWindow(const QString &projectPath, const QStringList &newCli
 
 	loadUiFromProject();
 	m_project.save();
+	m_undoBaseline = m_project.toJson();
+	updateUndoButtons();
 	m_tickTimer->start();
 }
 
@@ -246,6 +254,14 @@ void EditorWindow::buildUi()
 	ctrl->addWidget(m_playBtn);
 	ctrl->addWidget(fwdBtn);
 	ctrl->addStretch();
+	m_undoBtn = new QPushButton("↶ 실행 취소");
+	m_redoBtn = new QPushButton("↷ 다시 실행");
+	m_undoBtn->setToolTip("Ctrl+Z");
+	m_redoBtn->setToolTip("Ctrl+Y / Ctrl+Shift+Z");
+	ctrl->addWidget(m_undoBtn);
+	ctrl->addWidget(m_redoBtn);
+	connect(m_undoBtn, &QPushButton::clicked, this, &EditorWindow::undo);
+	connect(m_redoBtn, &QPushButton::clicked, this, &EditorWindow::redo);
 	leftLay->addLayout(ctrl);
 	m_timeLabel = new QLabel;
 	leftLay->addWidget(m_timeLabel);
@@ -291,7 +307,7 @@ void EditorWindow::buildUi()
 
 	root->addWidget(helpLabel(
 		"Space 재생/정지 · S 자르기 · B 선택 구간을 비트마다 자르기 · Delete 구간 삭제 · Ctrl+D 복제 · "
-		"T 자막 추가 · ←/→ 1초 · ,/. 0.1초 · 선택한 구간을 다시 잡고 끌면 순서 변경"));
+		"T 자막 추가 · Ctrl+Z 실행 취소 · ←/→ 1초 · ,/. 0.1초 · 선택한 구간을 다시 잡고 끌면 순서 변경"));
 }
 
 QWidget *EditorWindow::buildClipTab()
@@ -391,6 +407,26 @@ QWidget *EditorWindow::buildSegmentTab()
 		m_segTrans->addItem(transitionName(Transition(t)), t);
 	form->addRow("구간", m_segInfo);
 	form->addRow("배속", m_segSpeed);
+
+	// 속도 램프
+	auto *rampRow = new QHBoxLayout;
+	m_rampIn = new QCheckBox("들어갈 때 ↘");
+	m_rampOut = new QCheckBox("나올 때 ↗");
+	m_rampLen = new QDoubleSpinBox;
+	m_rampLen->setRange(0.1, 3.0);
+	m_rampLen->setSingleStep(0.1);
+	m_rampLen->setDecimals(1);
+	m_rampLen->setSuffix(" 초");
+	m_rampLen->setToolTip("속도가 바뀌는 데 걸리는 길이 (원본 영상 기준)");
+	rampRow->addWidget(m_rampIn);
+	rampRow->addWidget(m_rampOut);
+	rampRow->addWidget(m_rampLen);
+	form->addRow("속도 램프", rampRow);
+	form->addRow(helpLabel("램프를 켜면 1x에서 위 배속으로 부드럽게 바뀌고, 나올 때 다시 1x로 돌아옵니다. "
+			       "예: 0.5x + 들어갈 때·나올 때 → 킬 장면에서 서서히 느려졌다가 원래 속도로."));
+	connect(m_rampIn, &QCheckBox::toggled, this, &EditorWindow::onSegmentPropsChanged);
+	connect(m_rampOut, &QCheckBox::toggled, this, &EditorWindow::onSegmentPropsChanged);
+	connect(m_rampLen, &QDoubleSpinBox::valueChanged, this, &EditorWindow::onSegmentPropsChanged);
 	form->addRow("들어올 때 전환", m_segTrans);
 
 	auto *fxGrid = new QGridLayout;
@@ -417,7 +453,7 @@ QWidget *EditorWindow::buildSegmentTab()
 		log("모든 컷의 전환: " + transitionName(t));
 	});
 	form->addRow(allTrans);
-	form->addRow(helpLabel("배속, 줌인, 전환은 미리보기에 바로 보이고, 흑백/선명/비네팅/흔들림은 내보낸 영상에서 적용됩니다."));
+	form->addRow(helpLabel("배속, 속도 램프, 줌인, 전환은 미리보기에 바로 보이고, 흑백/선명/비네팅/흔들림은 내보낸 영상에서 적용됩니다."));
 
 	lay->addWidget(box);
 	lay->addStretch();
@@ -698,6 +734,9 @@ void EditorWindow::setupShortcuts()
 	add(QKeySequence(Qt::Key_Comma), [this] { seek(position() - 0.1); });
 	add(QKeySequence(Qt::Key_Period), [this] { seek(position() + 0.1); });
 	add(QKeySequence(Qt::Key_Home), [this] { seek(0); });
+	add(QKeySequence(Qt::CTRL | Qt::Key_Z), [this] { undo(); });
+	add(QKeySequence(Qt::CTRL | Qt::Key_Y), [this] { redo(); });
+	add(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Z), [this] { redo(); });
 }
 
 QPushButton *EditorWindow::makeColorButton(QColor *target, std::function<void()> onChange)
@@ -721,7 +760,7 @@ void EditorWindow::paintColorButton(QPushButton *b, const QColor &c)
 	b->setStyleSheet(QString("background:%1; border:1px solid #555; border-radius:4px;").arg(c.name()));
 }
 
-void EditorWindow::loadUiFromProject()
+void EditorWindow::loadUiFromProject(bool keepPosition)
 {
 	m_syncing = true;
 	const MusicTrack &m = m_project.music;
@@ -752,8 +791,16 @@ void EditorWindow::loadUiFromProject()
 	refreshSubtitleList();
 	applyLayoutToPreview();
 	rebuildSubtitleVisuals();
-	selectSegment(-1);
-	seek(0);
+	if (keepPosition) {
+		const double pos = position(); // selectSubtitle 이 위치를 옮길 수 있어서 먼저 기억
+		selectSegment(std::min(m_timeline->selectedSegment(), int(m_project.segments.size()) - 1));
+		selectSubtitle(std::min(m_subList->currentRow(), int(m_project.subtitles.size()) - 1));
+		m_activeSeg = -1;
+		seek(pos);
+	} else {
+		selectSegment(-1);
+		seek(0);
+	}
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -761,7 +808,17 @@ void EditorWindow::loadUiFromProject()
 // ═════════════════════════════════════════════════════════════
 void EditorWindow::createPlayerFor(int i)
 {
+	// 실행 취소로 클립이 빠졌다가 다시 추가되면 같은 번호의 플레이어를 재사용
+	if (i < m_players.size()) {
+		SourcePlayer &sp = m_players[i];
+		sp.path = m_project.sources[i].path;
+		sp.player->setSource(QUrl::fromLocalFile(sp.path));
+		sp.player->pause();
+		return;
+	}
+
 	SourcePlayer sp;
+	sp.path = m_project.sources[i].path;
 	sp.player = new QMediaPlayer(this);
 	sp.audio = new QAudioOutput(this);
 	sp.player->setAudioOutput(sp.audio);
@@ -793,6 +850,9 @@ void EditorWindow::onSourceInfo(int i)
 	const double dur = sp.player->duration() / 1000.0;
 	const QSize size = sp.item->nativeSize().toSize();
 	m_project.setSourceInfo(i, dur, size, sp.player->hasAudio());
+	// 클립 길이/해상도를 알아낸 것은 사용자 편집이 아니므로 실행 취소 기록에 넣지 않음
+	if (!m_undoTimer->isActive())
+		m_undoBaseline = m_project.toJson();
 	refreshClipList();
 	applyLayoutToPreview();
 	projectChanged();
@@ -928,8 +988,10 @@ void EditorWindow::syncPlayers(double t, bool playing)
 		const qint64 drift = std::llabs(sp.player->position() - expected);
 
 		if (playing) {
-			if (std::abs(sp.player->playbackRate() - seg.speed) > 0.01)
-				sp.player->setPlaybackRate(seg.speed);
+			// 속도 램프 중에는 재생 속도가 계속 바뀜
+			const double rate = seg.speedAt(loc.srcTime - seg.in);
+			if (std::abs(sp.player->playbackRate() - rate) > 0.02)
+				sp.player->setPlaybackRate(rate);
 			if (sp.player->playbackState() != QMediaPlayer::PlayingState) {
 				sp.player->setPosition(expected);
 				sp.player->play();
@@ -1174,7 +1236,7 @@ void EditorWindow::updateOverlays(double t)
 
 	QStringList info;
 	if (std::abs(seg.speed - 1.0) > 0.01)
-		info << QString("%1x").arg(seg.speed);
+		info << QString("%1x").arg(seg.speedAt(loc.srcTime - seg.in), 0, 'f', 2);
 	for (const QString &n : seg.effectNames())
 		if (n != "줌인")
 			info << n;
@@ -1290,6 +1352,13 @@ void EditorWindow::selectSegment(int i)
 	m_fxGray->setChecked(s.gray);
 	m_fxVivid->setChecked(s.vivid);
 	m_fxVignette->setChecked(s.vignette);
+	m_rampIn->setChecked(s.rampIn);
+	m_rampOut->setChecked(s.rampOut);
+	m_rampLen->setValue(s.rampLen);
+	const bool canRamp = std::abs(s.speed - 1.0) > 0.01;
+	m_rampIn->setEnabled(canRamp);
+	m_rampOut->setEnabled(canRamp);
+	m_rampLen->setEnabled(canRamp);
 	m_syncing = false;
 }
 
@@ -1306,6 +1375,9 @@ void EditorWindow::onSegmentPropsChanged()
 	s.gray = m_fxGray->isChecked();
 	s.vivid = m_fxVivid->isChecked();
 	s.vignette = m_fxVignette->isChecked();
+	s.rampIn = m_rampIn->isChecked();
+	s.rampOut = m_rampOut->isChecked();
+	s.rampLen = m_rampLen->value();
 	selectSegment(i);
 	projectChanged();
 	seek(position());
@@ -1531,10 +1603,102 @@ void EditorWindow::onExport()
 
 void EditorWindow::projectChanged()
 {
+	if (!m_restoring) {
+		m_undoTimer->start();
+		updateUndoButtons();
+	}
 	m_timeline->update();
 	refreshClipList();
 	updateTimeLabel(position());
 	m_saveTimer->start();
+}
+
+// ═════════════════════════════════════════════════════════════
+// 실행 취소 / 다시 실행
+// 편집할 때마다 프로젝트 전체를 JSON 스냅샷으로 기록 (프로젝트가 작아서 가볍고 확실함)
+// ═════════════════════════════════════════════════════════════
+void EditorWindow::commitUndoStep()
+{
+	m_undoTimer->stop();
+	const QJsonObject cur = m_project.toJson();
+	if (cur == m_undoBaseline)
+		return;
+	m_undoStack.push_back(m_undoBaseline);
+	if (m_undoStack.size() > 200)
+		m_undoStack.removeFirst();
+	m_redoStack.clear();
+	m_undoBaseline = cur;
+	updateUndoButtons();
+}
+
+void EditorWindow::undo()
+{
+	commitUndoStep(); // 아직 기록 안 된 마지막 편집부터 확정
+	if (m_undoStack.isEmpty()) {
+		log("더 이상 되돌릴 작업이 없습니다");
+		return;
+	}
+	m_redoStack.push_back(m_undoBaseline);
+	restoreSnapshot(m_undoStack.takeLast());
+	log("실행 취소");
+}
+
+void EditorWindow::redo()
+{
+	commitUndoStep();
+	if (m_redoStack.isEmpty()) {
+		log("다시 실행할 작업이 없습니다");
+		return;
+	}
+	m_undoStack.push_back(m_undoBaseline);
+	restoreSnapshot(m_redoStack.takeLast());
+	log("다시 실행");
+}
+
+void EditorWindow::restoreSnapshot(const QJsonObject &snapshot)
+{
+	m_restoring = true;
+	const QVector<SourceClip> before = m_project.sources;
+	const QString musicBefore = m_project.music.path;
+
+	m_project.fromJson(snapshot);
+
+	// 같은 파일이면 실제로 읽어 둔 길이/해상도 정보를 유지
+	for (int i = 0; i < m_project.sources.size() && i < before.size(); ++i) {
+		SourceClip &c = m_project.sources[i];
+		if (c.path == before[i].path && before[i].duration > 0) {
+			c.duration = before[i].duration;
+			c.size = before[i].size;
+			c.hasAudio = before[i].hasAudio;
+		}
+	}
+	// 클립 구성이 바뀌었으면 플레이어도 맞춰 줌
+	for (int i = 0; i < m_project.sources.size(); ++i) {
+		if (i >= m_players.size())
+			createPlayerFor(i);
+		else if (m_players[i].path != m_project.sources[i].path)
+			createPlayerFor(i); // 같은 번호 재사용
+	}
+	if (m_project.music.path != musicBefore) {
+		m_bgm->stop();
+		m_bgm->setSource(m_project.music.path.isEmpty() ? QUrl() : QUrl::fromLocalFile(m_project.music.path));
+	}
+
+	m_undoBaseline = m_project.toJson();
+	loadUiFromProject(true);
+	m_timeline->update();
+	m_restoring = false;
+	m_saveTimer->start();
+	updateUndoButtons();
+}
+
+void EditorWindow::updateUndoButtons()
+{
+	if (!m_undoBtn)
+		return;
+	// 기록 대기 중인 편집이 있으면 되돌릴 수 있음
+	m_undoBtn->setEnabled(!m_undoStack.isEmpty() || m_undoTimer->isActive());
+	m_redoBtn->setEnabled(!m_redoStack.isEmpty());
 }
 
 void EditorWindow::log(const QString &msg)
