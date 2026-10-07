@@ -8,6 +8,8 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
+#include <string>
 #include <exception>
 #include <mutex>
 
@@ -28,6 +30,9 @@ bool g_previousCrashed = false;
 bool g_noDialogs = false; // 자동 테스트(빌드 서버)에서는 안내 창을 띄우지 않음
 
 QString markerPath() { return g_logDir + "/.running"; }
+
+void writeStackTrace(EXCEPTION_POINTERS *ep);
+std::string currentThreadName();
 
 void writeRaw(const char *text)
 {
@@ -96,10 +101,11 @@ LONG WINAPI unhandledException(EXCEPTION_POINTERS *ep)
 	char module[MAX_PATH * 3];
 	WideCharToMultiByte(CP_UTF8, 0, moduleW, -1, module, sizeof(module), nullptr, nullptr);
 	char line[1024];
-	std::snprintf(line, sizeof(line), "[충돌] 예외 코드 0x%08lX, 위치 %s + 0x%llX (스레드 %lu)",
+	std::snprintf(line, sizeof(line), "[충돌] 예외 코드 0x%08lX, 위치 %s + 0x%llX (스레드 %lu '%s')",
 		      static_cast<unsigned long>(code), module, static_cast<unsigned long long>(offset),
-		      GetCurrentThreadId());
+		      GetCurrentThreadId(), currentThreadName().c_str());
 	writeRaw(line);
+	writeStackTrace(ep);
 
 	// 미니덤프 저장 (개발자가 정확한 원인을 볼 수 있음)
 	HANDLE f = CreateFileW(g_dumpPathW.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
@@ -125,6 +131,78 @@ LONG WINAPI unhandledException(EXCEPTION_POINTERS *ep)
 	if (!g_noDialogs)
 		MessageBoxW(nullptr, text.c_str(), L"ERShorts 충돌", MB_ICONERROR | MB_TOPMOST);
 	return EXCEPTION_EXECUTE_HANDLER;
+}
+
+// 충돌한 스레드의 호출 스택 (모듈!함수+오프셋). PDB가 없어도 DLL이 내보낸 함수 이름은 나옴
+void writeStackTrace(EXCEPTION_POINTERS *ep)
+{
+	HANDLE proc = GetCurrentProcess();
+	SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_FAIL_CRITICAL_ERRORS);
+	SymInitialize(proc, nullptr, TRUE);
+
+	CONTEXT ctx = *ep->ContextRecord;
+	STACKFRAME64 sf = {};
+	sf.AddrPC.Offset = ctx.Rip;
+	sf.AddrPC.Mode = AddrModeFlat;
+	sf.AddrFrame.Offset = ctx.Rbp;
+	sf.AddrFrame.Mode = AddrModeFlat;
+	sf.AddrStack.Offset = ctx.Rsp;
+	sf.AddrStack.Mode = AddrModeFlat;
+
+	alignas(SYMBOL_INFO) char symBuf[sizeof(SYMBOL_INFO) + 256];
+	for (int i = 0; i < 40; ++i) {
+		if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, proc, GetCurrentThread(), &sf, &ctx, nullptr,
+				 SymFunctionTableAccess64, SymGetModuleBase64, nullptr))
+			break;
+		const DWORD64 pc = sf.AddrPC.Offset;
+		if (pc == 0)
+			break;
+
+		wchar_t modW[MAX_PATH] = L"?";
+		HMODULE mod = nullptr;
+		DWORD64 modOff = 0;
+		if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				       reinterpret_cast<LPCWSTR>(pc), &mod)) {
+			GetModuleFileNameW(mod, modW, MAX_PATH);
+			modOff = pc - reinterpret_cast<DWORD64>(mod);
+		}
+		const wchar_t *base = wcsrchr(modW, L'\\');
+		char modName[MAX_PATH * 3];
+		WideCharToMultiByte(CP_UTF8, 0, base ? base + 1 : modW, -1, modName, sizeof(modName), nullptr, nullptr);
+
+		auto *sym = reinterpret_cast<SYMBOL_INFO *>(symBuf);
+		std::memset(symBuf, 0, sizeof(symBuf));
+		sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+		sym->MaxNameLen = 255;
+		DWORD64 symOff = 0;
+		char line[700];
+		if (SymFromAddr(proc, pc, &symOff, sym))
+			std::snprintf(line, sizeof(line), "  #%02d %s!%s+0x%llX", i, modName, sym->Name,
+				      static_cast<unsigned long long>(symOff));
+		else
+			std::snprintf(line, sizeof(line), "  #%02d %s+0x%llX", i, modName,
+				      static_cast<unsigned long long>(modOff));
+		writeRaw(line);
+	}
+}
+
+// 충돌한 스레드 이름 (libobs는 "libobs: graphics thread" 같은 이름을 붙여 둠)
+std::string currentThreadName()
+{
+	using GetDescFn = HRESULT(WINAPI *)(HANDLE, PWSTR *);
+	auto fn = reinterpret_cast<GetDescFn>(
+		reinterpret_cast<void *>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription")));
+	if (!fn)
+		return {};
+	PWSTR desc = nullptr;
+	std::string out;
+	if (SUCCEEDED(fn(GetCurrentThread(), &desc)) && desc) {
+		char buf[512];
+		WideCharToMultiByte(CP_UTF8, 0, desc, -1, buf, sizeof(buf), nullptr, nullptr);
+		out = buf;
+		LocalFree(desc);
+	}
+	return out;
 }
 
 void terminateHandler()
