@@ -31,6 +31,7 @@ add_executable(ERShorts WIN32
   src/ThumbnailCache.h    src/ThumbnailCache.cpp
   src/Diagnostics.h       src/Diagnostics.cpp
   src/BandLayout.h        src/BandLayout.cpp
+  src/FontManager.h       src/FontManager.cpp
 )
 
 target_link_libraries(ERShorts PRIVATE

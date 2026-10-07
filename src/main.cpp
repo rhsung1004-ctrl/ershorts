@@ -2,6 +2,7 @@
 #include <QMessageBox>
 
 #include "Diagnostics.h"
+#include "FontManager.h"
 #include "MainWindow.h"
 
 int main(int argc, char *argv[])
@@ -16,6 +17,7 @@ int main(int argc, char *argv[])
 
 	// 로그/충돌 기록은 가장 먼저 (libobs 초기화 로그까지 남기기 위해)
 	Diagnostics::init();
+	FontManager::init(); // 사용자가 추가한 글꼴 등록
 
 	bool safeMode = app.arguments().contains("--safe-mode");
 	if (!safeMode && Diagnostics::previousRunCrashed()) {

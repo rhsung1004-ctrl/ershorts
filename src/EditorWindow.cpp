@@ -1,6 +1,7 @@
 #include "EditorWindow.h"
 
 #include "BandLayout.h"
+#include "FontManager.h"
 #include "BeatDetector.h"
 #include "ShortsExporter.h"
 #include "ThumbnailCache.h"
@@ -40,6 +41,7 @@
 #include <QShortcut>
 #include <QSlider>
 #include <QSpinBox>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QSplitter>
 #include <QTabWidget>
@@ -679,6 +681,12 @@ QWidget *EditorWindow::buildSubtitleTab()
 	m_subSize->setRange(28, 200);
 	m_subSize->setSuffix(" px");
 	form->addRow("글자 크기", m_subSize);
+	m_subFont = makeFontCombo();
+	connect(m_subFont, &QComboBox::currentIndexChanged, this, [this] {
+		if (!handleFontComboAdd(m_subFont))
+			onSubtitlePropsChanged();
+	});
+	form->addRow("글꼴", m_subFont);
 
 	auto *colorRow = new QHBoxLayout;
 	m_subColor = makeColorButton(&m_subColorValue, [this] { onSubtitlePropsChanged(); });
@@ -790,8 +798,10 @@ QWidget *EditorWindow::buildLayoutTab()
 		sp->setSuffix(" px");
 		return sp;
 	};
-	auto styleRow = [](QSpinBox *sp, QPushButton *color) {
+	auto styleRow = [](QSpinBox *sp, QPushButton *color, QComboBox *font) {
 		auto *row = new QHBoxLayout;
+		row->addWidget(font, 1);
+		row->addSpacing(6);
 		row->addWidget(new QLabel("크기"));
 		row->addWidget(sp);
 		row->addSpacing(8);
@@ -807,14 +817,16 @@ QWidget *EditorWindow::buildLayoutTab()
 	m_bandTitleSize = sizeSpin(20, 220);
 	m_bandTitleColor = makeColorButton(&m_project.bands.titleColor, [this] { onBandPropsChanged(); });
 	f->addRow("제목", m_bandTitle);
-	f->addRow("", styleRow(m_bandTitleSize, m_bandTitleColor));
+	m_bandTitleFont = makeFontCombo();
+	f->addRow("", styleRow(m_bandTitleSize, m_bandTitleColor, m_bandTitleFont));
 
 	m_bandSubtitle = new QLineEdit;
 	m_bandSubtitle->setPlaceholderText("제목 아래 작은 글씨 (예: 아델라 장인의 하루)");
 	m_bandSubSize = sizeSpin(20, 160);
 	m_bandSubColor = makeColorButton(&m_project.bands.subtitleColor, [this] { onBandPropsChanged(); });
 	f->addRow("부제", m_bandSubtitle);
-	f->addRow("", styleRow(m_bandSubSize, m_bandSubColor));
+	m_bandSubFont = makeFontCombo();
+	f->addRow("", styleRow(m_bandSubSize, m_bandSubColor, m_bandSubFont));
 
 	m_bandBottomText = new QPlainTextEdit;
 	m_bandBottomText->setMaximumHeight(60);
@@ -822,7 +834,8 @@ QWidget *EditorWindow::buildLayoutTab()
 	m_bandBottomSize = sizeSpin(20, 160);
 	m_bandBottomColor = makeColorButton(&m_project.bands.bottomColor, [this] { onBandPropsChanged(); });
 	f->addRow("아래 문구", m_bandBottomText);
-	f->addRow("", styleRow(m_bandBottomSize, m_bandBottomColor));
+	m_bandBottomFont = makeFontCombo();
+	f->addRow("", styleRow(m_bandBottomSize, m_bandBottomColor, m_bandBottomFont));
 
 	auto slider = [](int lo, int hi, int step) {
 		auto *s = new QSlider(Qt::Horizontal);
@@ -851,6 +864,11 @@ QWidget *EditorWindow::buildLayoutTab()
 	connect(m_bandBottomText, &QPlainTextEdit::textChanged, this, &EditorWindow::onBandPropsChanged);
 	for (QSpinBox *sp : {m_bandTitleSize, m_bandSubSize, m_bandBottomSize})
 		connect(sp, &QSpinBox::valueChanged, this, &EditorWindow::onBandPropsChanged);
+	for (QComboBox *fc : {m_bandTitleFont, m_bandSubFont, m_bandBottomFont})
+		connect(fc, &QComboBox::currentIndexChanged, this, [this, fc] {
+			if (!handleFontComboAdd(fc))
+				onBandPropsChanged();
+		});
 	for (QSlider *sl : {m_bandTopH, m_bandBottomH, m_bandZoom, m_bandOffset})
 		connect(sl, &QSlider::valueChanged, this, &EditorWindow::onBandPropsChanged);
 	return w;
@@ -871,8 +889,101 @@ void EditorWindow::onBandPropsChanged()
 	b.bottomHeight = m_bandBottomH->value() & ~1;
 	b.zoom = m_bandZoom->value() / 100.0;
 	b.offsetY = m_bandOffset->value() / 100.0;
+	b.titleFont = m_bandTitleFont->currentData().toString();
+	b.subtitleFont = m_bandSubFont->currentData().toString();
+	b.bottomFont = m_bandBottomFont->currentData().toString();
 	applyLayoutToPreview();
 	projectChanged();
+}
+
+// ═════════════════════════════════════════════════════════════
+// 글꼴 선택 목록 (자막 / 제목 띠 공통)
+// ═════════════════════════════════════════════════════════════
+static const QString kAddFontItem = QStringLiteral("__add_font__");
+
+QComboBox *EditorWindow::makeFontCombo()
+{
+	auto *c = new QComboBox;
+	c->setMinimumContentsLength(12);
+	c->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+	c->setToolTip("목록 맨 아래 '＋ 글꼴 추가…'로 원하는 글꼴 파일(TTF/OTF)을 추가할 수 있어요");
+	m_fontCombos.push_back(c);
+	refreshFontCombos();
+	return c;
+}
+
+void EditorWindow::refreshFontCombos()
+{
+	const bool wasSyncing = m_syncing;
+	m_syncing = true;
+	for (QComboBox *c : m_fontCombos) {
+		const QString keep = c->currentData().toString();
+		c->blockSignals(true);
+		c->clear();
+		c->addItem(FontManager::displayName(QString()), QString());
+		c->setItemData(0, FontManager::qfont(QString(), 15), Qt::FontRole);
+		for (const FontManager::Entry &e : FontManager::fonts()) {
+			c->addItem(e.family, e.path);
+			c->setItemData(c->count() - 1, FontManager::qfont(e.path, 15), Qt::FontRole); // 목록에서 모양 미리보기
+			c->setItemData(c->count() - 1, e.label, Qt::ToolTipRole);
+		}
+		c->addItem("＋ 글꼴 추가…", kAddFontItem);
+		const int idx = c->findData(keep);
+		c->setCurrentIndex(idx >= 0 && keep != kAddFontItem ? idx : 0);
+		c->blockSignals(false);
+	}
+	m_syncing = wasSyncing;
+}
+
+void EditorWindow::setFontComboValue(QComboBox *combo, const QString &path)
+{
+	combo->blockSignals(true);
+	int idx = combo->findData(path);
+	if (idx < 0 && !path.isEmpty()) {
+		// 프로젝트에 저장된 글꼴 파일이 지금 목록에 없으면 (다른 PC 등) 이름만이라도 표시
+		combo->insertItem(combo->count() - 1, FontManager::displayName(path) + " (파일 없음 → 기본 글꼴)", path);
+		idx = combo->findData(path);
+	}
+	combo->setCurrentIndex(std::max(0, idx));
+	combo->blockSignals(false);
+}
+
+bool EditorWindow::handleFontComboAdd(QComboBox *combo)
+{
+	if (combo->currentData().toString() != kAddFontItem)
+		return false;
+	const QStringList files = QFileDialog::getOpenFileNames(
+		this, "글꼴 파일 추가",
+		QStandardPaths::writableLocation(QStandardPaths::DownloadLocation),
+		"글꼴 파일 (*.ttf *.otf *.ttc);;모든 파일 (*)");
+	QString added;
+	for (const QString &f : files) {
+		QString err;
+		const QString path = FontManager::addFontFile(f, &err);
+		if (path.isEmpty()) {
+			log(QFileInfo(f).fileName() + ": " + err);
+			continue;
+		}
+		log("글꼴 추가: " + FontManager::displayName(path));
+		added = path;
+	}
+	// 모든 글꼴 목록을 새로 채우고, 각 목록은 프로젝트에 저장된 글꼴로 되돌림 (취소했을 때 포함)
+	refreshFontCombos();
+	const TitleBands &tb = m_project.bands;
+	setFontComboValue(m_bandTitleFont, tb.titleFont);
+	setFontComboValue(m_bandSubFont, tb.subtitleFont);
+	setFontComboValue(m_bandBottomFont, tb.bottomFont);
+	const int si = m_subList->currentRow();
+	setFontComboValue(m_subFont, (si >= 0 && si < m_project.subtitles.size()) ? m_project.subtitles[si].font : QString());
+
+	if (!added.isEmpty()) {
+		setFontComboValue(combo, added); // 방금 추가한 글꼴을 바로 선택해서 반영
+		if (combo == m_subFont)
+			onSubtitlePropsChanged();
+		else
+			onBandPropsChanged();
+	}
+	return true;
 }
 
 QWidget *EditorWindow::buildExportTab()
@@ -1004,6 +1115,9 @@ void EditorWindow::loadUiFromProject(bool keepPosition)
 		m_bandBottomH->setValue(b.bottomHeight);
 		m_bandZoom->setValue(int(std::lround(b.zoom * 100)));
 		m_bandOffset->setValue(int(std::lround(b.offsetY * 100)));
+		setFontComboValue(m_bandTitleFont, b.titleFont);
+		setFontComboValue(m_bandSubFont, b.subtitleFont);
+		setFontComboValue(m_bandBottomFont, b.bottomFont);
 	}
 	m_syncing = false;
 
@@ -1348,10 +1462,7 @@ void EditorWindow::rebuildBandVisuals()
 
 	for (const BandLine &l : BandLayout::lines(m_project)) {
 		auto *t = new QGraphicsSimpleTextItem(l.text, m_canvas);
-		QFont f(BandLayout::fontFamily());
-		f.setBold(true);
-		f.setPixelSize(l.size);
-		t->setFont(f);
+		t->setFont(FontManager::qfont(l.fontPath, l.size));
 		t->setBrush(l.color);
 		t->setZValue(7);
 		const QRectF br = t->boundingRect();
@@ -1377,10 +1488,7 @@ void EditorWindow::rebuildSubtitleVisuals()
 		v.box->setZValue(10);
 
 		v.text = new QGraphicsSimpleTextItem(s.text.trimmed(), m_canvas);
-		QFont f("Malgun Gothic");
-		f.setBold(true);
-		f.setPixelSize(s.fontSize);
-		v.text->setFont(f);
+		v.text->setFont(FontManager::qfont(s.font, s.fontSize));
 		v.text->setBrush(s.color);
 		v.text->setPen(QPen(Qt::black, 3));
 		v.text->setZValue(11);
@@ -1753,6 +1861,7 @@ void EditorWindow::addSubtitle()
 		s.color = prev.color;
 		s.y = prev.y;
 		s.box = prev.box;
+		s.font = prev.font;
 	}
 	s.start = t;
 	s.end = std::min(t + 2.0, total);
@@ -1801,6 +1910,7 @@ void EditorWindow::selectSubtitle(int i)
 		paintColorButton(m_subColor, s.color);
 		m_subY->setValue(int(std::lround(s.y * 100)));
 		m_subBox->setChecked(s.box);
+		setFontComboValue(m_subFont, s.font);
 		if (!m_playing && (position() < s.start || position() >= s.end))
 			seek(s.start);
 	}
@@ -1820,6 +1930,7 @@ void EditorWindow::onSubtitlePropsChanged()
 	s.color = m_subColorValue;
 	s.y = m_subY->value() / 100.0;
 	s.box = m_subBox->isChecked();
+	s.font = m_subFont->currentData().toString();
 
 	m_syncing = true;
 	if (QListWidgetItem *it = m_subList->item(i))

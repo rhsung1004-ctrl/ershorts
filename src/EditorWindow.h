@@ -61,6 +61,12 @@ private:
 	QWidget *buildLayoutTab();
 	void rebuildBandVisuals();
 	void onBandPropsChanged();
+
+	// ── 글꼴 ──
+	QComboBox *makeFontCombo();
+	void refreshFontCombos();
+	void setFontComboValue(QComboBox *combo, const QString &path);
+	bool handleFontComboAdd(QComboBox *combo); // "＋ 글꼴 추가…" 선택 시 true
 	QWidget *buildExportTab();
 	void setupShortcuts();
 	void loadUiFromProject(bool keepPosition = false);
@@ -229,6 +235,8 @@ private:
 	QPushButton *m_subColor = nullptr;
 	QSlider *m_subY = nullptr;
 	QCheckBox *m_subBox = nullptr;
+	QComboBox *m_subFont = nullptr;
+	QVector<QComboBox *> m_fontCombos;
 	QColor m_subColorValue = Qt::white;
 
 	// 인트로/아웃트로 탭
@@ -250,6 +258,7 @@ private:
 	QSpinBox *m_bandTitleSize = nullptr, *m_bandSubSize = nullptr, *m_bandBottomSize = nullptr;
 	QPushButton *m_bandTitleColor = nullptr, *m_bandSubColor = nullptr, *m_bandBottomColor = nullptr,
 		    *m_bandBg = nullptr;
+	QComboBox *m_bandTitleFont = nullptr, *m_bandSubFont = nullptr, *m_bandBottomFont = nullptr;
 	QSlider *m_bandTopH = nullptr, *m_bandBottomH = nullptr, *m_bandZoom = nullptr, *m_bandOffset = nullptr;
 
 	// 내보내기 탭

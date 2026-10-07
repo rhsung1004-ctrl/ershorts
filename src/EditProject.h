@@ -68,6 +68,7 @@ struct Subtitle {
 	QColor color = Qt::white;
 	double y = 0.72; // 0 = 위, 1 = 아래 (글자 중심)
 	bool box = true;
+	QString font;    // 글꼴 파일 경로 (빈 문자열 = 기본 맑은 고딕 Bold)
 };
 
 // 인트로/아웃트로 화면
@@ -119,6 +120,9 @@ struct TitleBands {
 	QString bottomText;     // 아래 띠 글씨
 	int bottomSize = 64;
 	QColor bottomColor = Qt::white;
+	QString titleFont;      // 글꼴 파일 경로 (빈 문자열 = 기본)
+	QString subtitleFont;
+	QString bottomFont;
 
 	double zoom = 1.0;      // 가운데 영상 확대 (1.0 ~ 2.0)
 	double offsetY = 0.0;   // 가운데 영상 세로 위치 (-1 = 위쪽, 0 = 가운데, 1 = 아래쪽)

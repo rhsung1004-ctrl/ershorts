@@ -1,6 +1,7 @@
 #include "BandLayout.h"
 
 #include "EditProject.h"
+#include "FontManager.h"
 
 #include <QFont>
 #include <QFontMetrics>
@@ -8,16 +9,11 @@
 
 namespace BandLayout {
 
-QString fontFamily() { return QStringLiteral("Malgun Gothic"); }
-
-int fitSize(const QString &line, int size, int maxWidth)
+int fitSize(const QString &line, int size, const QString &fontPath, int maxWidth)
 {
-	// 내보내기에 쓰는 맑은 고딕 Bold 기준으로 폭을 재서, 넘치면 글자 크기를 줄임
-	QFont f(fontFamily());
-	f.setBold(true);
+	// 실제로 쓸 글꼴로 폭을 재서, 넘치면 글자 크기를 줄임
 	while (size > 24) {
-		f.setPixelSize(size);
-		if (QFontMetrics(f).horizontalAdvance(line) <= maxWidth)
+		if (QFontMetrics(FontManager::qfont(fontPath, size)).horizontalAdvance(line) <= maxWidth)
 			break;
 		size -= 2;
 	}
@@ -41,7 +37,8 @@ static void stack(QVector<BandLine> &out, QVector<BandLine> group, double bandTo
 	}
 }
 
-static void addLines(QVector<BandLine> &group, const QString &text, int size, const QColor &color)
+static void addLines(QVector<BandLine> &group, const QString &text, int size, const QColor &color,
+		     const QString &fontPath)
 {
 	for (const QString &raw : text.split('\n')) {
 		const QString line = raw.trimmed();
@@ -49,8 +46,9 @@ static void addLines(QVector<BandLine> &group, const QString &text, int size, co
 			continue;
 		BandLine l;
 		l.text = line;
-		l.size = fitSize(line, size);
+		l.size = fitSize(line, size, fontPath);
 		l.color = color;
+		l.fontPath = fontPath;
 		group.push_back(l);
 	}
 }
@@ -61,12 +59,12 @@ QVector<BandLine> lines(const EditProject &p)
 	const TitleBands &b = p.bands;
 
 	QVector<BandLine> top;
-	addLines(top, b.title, b.titleSize, b.titleColor);
-	addLines(top, b.subtitle, b.subtitleSize, b.subtitleColor);
+	addLines(top, b.title, b.titleSize, b.titleColor, b.titleFont);
+	addLines(top, b.subtitle, b.subtitleSize, b.subtitleColor, b.subtitleFont);
 	stack(out, top, 0, b.topHeight);
 
 	QVector<BandLine> bottom;
-	addLines(bottom, b.bottomText, b.bottomSize, b.bottomColor);
+	addLines(bottom, b.bottomText, b.bottomSize, b.bottomColor, b.bottomFont);
 	stack(out, bottom, 1920 - b.bottomHeight, b.bottomHeight);
 	return out;
 }

@@ -11,12 +11,12 @@ struct BandLine {
 	QString text;
 	int size = 60;    // 픽셀 (긴 줄은 화면 폭에 맞게 자동으로 줄어듦)
 	QColor color;
+	QString fontPath;   // 빈 문자열 = 기본 글꼴
 	double slotTop = 0; // 1080x1920 캔버스에서 이 줄이 차지하는 칸의 위쪽
 	double slotHeight = 0;
 };
 
 namespace BandLayout {
 QVector<BandLine> lines(const EditProject &p);
-int fitSize(const QString &line, int size, int maxWidth = 1000);
-QString fontFamily(); // "Malgun Gothic"
+int fitSize(const QString &line, int size, const QString &fontPath, int maxWidth = 1000);
 }

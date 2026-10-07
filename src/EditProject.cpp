@@ -391,7 +391,7 @@ QJsonObject EditProject::toJson() const
 	for (const Subtitle &s : subtitles)
 		subs.append(QJsonObject{{"start", s.start}, {"end", s.end}, {"text", s.text},
 					{"fontSize", s.fontSize}, {"color", s.color.name()}, {"y", s.y},
-					{"box", s.box}});
+					{"box", s.box}, {"font", s.font}});
 
 	const QJsonObject mus{{"path", music.path},       {"fileOffset", music.fileOffset},
 			      {"volume", music.volume},   {"bpm", music.bpm},
@@ -416,7 +416,9 @@ QJsonObject EditProject::toJson() const
 				      {"subtitle", bands.subtitle}, {"subtitleSize", bands.subtitleSize},
 				      {"subtitleColor", bands.subtitleColor.name()}, {"bottomText", bands.bottomText},
 				      {"bottomSize", bands.bottomSize}, {"bottomColor", bands.bottomColor.name()},
-				      {"zoom", bands.zoom}, {"offsetY", bands.offsetY}}},
+				      {"zoom", bands.zoom}, {"offsetY", bands.offsetY},
+				      {"titleFont", bands.titleFont}, {"subtitleFont", bands.subtitleFont},
+				      {"bottomFont", bands.bottomFont}}},
 		{"minimap", QJsonArray{minimapRect.x(), minimapRect.y(), minimapRect.width(), minimapRect.height()}},
 	};
 }
@@ -467,6 +469,7 @@ void EditProject::fromJson(const QJsonObject &o)
 		s.color = QColor(j.value("color").toString("#ffffff"));
 		s.y = std::clamp(j.value("y").toDouble(0.72), 0.0, 1.0);
 		s.box = j.value("box").toBool(true);
+		s.font = j.value("font").toString();
 		subtitles.push_back(s);
 	}
 
@@ -505,6 +508,9 @@ void EditProject::fromJson(const QJsonObject &o)
 	bands.bottomColor = QColor(b.value("bottomColor").toString(def.bottomColor.name()));
 	bands.zoom = std::clamp(b.value("zoom").toDouble(1.0), 1.0, 3.0);
 	bands.offsetY = std::clamp(b.value("offsetY").toDouble(0.0), -1.0, 1.0);
+	bands.titleFont = b.value("titleFont").toString();
+	bands.subtitleFont = b.value("subtitleFont").toString();
+	bands.bottomFont = b.value("bottomFont").toString();
 	const QJsonArray mm = o.value("minimap").toArray();
 	if (mm.size() == 4)
 		minimapRect = QRectF(mm[0].toDouble(), mm[1].toDouble(), mm[2].toDouble(), mm[3].toDouble());

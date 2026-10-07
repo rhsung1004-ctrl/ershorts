@@ -1,6 +1,7 @@
 #include "ShortsExporter.h"
 
 #include "BandLayout.h"
+#include "FontManager.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -302,12 +303,12 @@ QString ShortsExporter::buildFilter()
 		g << m + "[mid]";
 
 		// 위/아래 띠 + 글씨 (줄마다 가운데 정렬)
-		const QString bandFont = filterPath("C:/Windows/Fonts/malgunbd.ttf");
 		QString b = QString("[mid]pad=1080:1920:0:%1:color=%2").arg(p.bands.topHeight).arg(hexColor(p.bands.background));
 		int k = 0;
 		for (const BandLine &l : BandLayout::lines(p)) {
 			b += QString(",drawtext=fontfile=%1:textfile=%2:fontsize=%3:fontcolor=%4:x=(w-text_w)/2:y=%5+(%6-text_h)/2")
-				     .arg(bandFont, filterPath(writeTextFile(QString("band_%1.txt").arg(k++), l.text)))
+				     .arg(filterPath(FontManager::renderFile(l.fontPath)),
+					  filterPath(writeTextFile(QString("band_%1.txt").arg(k++), l.text)))
 				     .arg(l.size)
 				     .arg(hexColor(l.color), n6(l.slotTop), n6(l.slotHeight));
 		}
@@ -362,7 +363,6 @@ QString ShortsExporter::buildFilter()
 
 	// ── 5) 자막 (결과 시간 기준) ──────────────────────
 	QStringList texts;
-	const QString font = filterPath("C:/Windows/Fonts/malgunbd.ttf");
 	for (int i = 0; i < p.subtitles.size(); ++i) {
 		const Subtitle &s = p.subtitles[i];
 		if (s.text.trimmed().isEmpty() || s.end <= s.start)
@@ -370,7 +370,8 @@ QString ShortsExporter::buildFilter()
 		QString dt = QString("drawtext=fontfile=%1:textfile=%2:fontsize=%3:fontcolor=%4:"
 				     "line_spacing=10:borderw=5:bordercolor=black:"
 				     "x=(w-text_w)/2:y=h*%5-text_h/2:enable='between(t,%6,%7)'")
-				     .arg(font, filterPath(writeTextFile(QString("sub_%1.txt").arg(i), s.text)))
+				     .arg(filterPath(FontManager::renderFile(s.font)),
+					  filterPath(writeTextFile(QString("sub_%1.txt").arg(i), s.text)))
 				     .arg(s.fontSize)
 				     .arg(hexColor(s.color), num(s.y), num(s.start), num(s.end));
 		if (s.box)
