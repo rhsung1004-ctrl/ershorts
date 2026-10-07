@@ -1,0 +1,358 @@
+#include "EditProject.h"
+
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+
+#include <algorithm>
+#include <cmath>
+
+QString SourceClip::name() const { return QFileInfo(path).completeBaseName(); }
+
+QString transitionName(Transition t)
+{
+	switch (t) {
+	case Transition::None: return "없음 (바로 컷)";
+	case Transition::Flash: return "화이트 플래시";
+	case Transition::BlackDip: return "블랙 페이드";
+	case Transition::ZoomPunch: return "줌 펀치";
+	case Transition::Glitch: return "글리치";
+	}
+	return {};
+}
+
+QStringList Segment::effectNames() const
+{
+	QStringList n;
+	if (zoom) n << "줌인";
+	if (shake) n << "흔들림";
+	if (gray) n << "흑백";
+	if (vivid) n << "선명";
+	if (vignette) n << "비네팅";
+	return n;
+}
+
+// ─── 클립 ───────────────────────────────────────────────
+int EditProject::addSource(const QString &path)
+{
+	SourceClip c;
+	c.path = path;
+	sources.push_back(c);
+	const int idx = int(sources.size()) - 1;
+
+	Segment s;
+	s.source = idx;
+	s.in = 0.0;
+	s.out = -1.0;
+	if (!segments.isEmpty())
+		s.transIn = Transition::Flash; // 매드무비 기본: 컷마다 플래시
+	segments.push_back(s);
+	return idx;
+}
+
+void EditProject::setSourceInfo(int index, double duration, QSize size, bool hasAudio)
+{
+	if (index < 0 || index >= sources.size())
+		return;
+	SourceClip &c = sources[index];
+	if (duration > 0)
+		c.duration = duration;
+	if (size.isValid() && size.width() > 0)
+		c.size = size;
+	c.hasAudio = hasAudio;
+
+	if (c.duration <= 0)
+		return;
+	for (Segment &s : segments) {
+		if (s.source != index)
+			continue;
+		if (s.out < 0 || s.out > c.duration)
+			s.out = c.duration;
+		s.in = std::clamp(s.in, 0.0, std::max(0.0, s.out - 0.1));
+	}
+}
+
+bool EditProject::allSourcesReady() const
+{
+	for (const Segment &s : segments)
+		if (s.out <= s.in)
+			return false;
+	return true;
+}
+
+// ─── 시간 ───────────────────────────────────────────────
+double EditProject::segmentStart(int i) const
+{
+	double t = introDuration();
+	for (int k = 0; k < i && k < segments.size(); ++k)
+		t += segments[k].outDuration();
+	return t;
+}
+
+EditProject::Locate EditProject::locate(double t) const
+{
+	Locate r;
+	if (t < 0)
+		t = 0;
+	const double introD = introDuration();
+	if (t < introD) {
+		r.kind = Locate::Intro;
+		r.local = t;
+		return r;
+	}
+	double acc = introD;
+	for (int i = 0; i < segments.size(); ++i) {
+		const double d = segments[i].outDuration();
+		if (d > 0 && t < acc + d) {
+			r.kind = Locate::Segment;
+			r.seg = i;
+			r.local = t - acc;
+			r.srcTime = segments[i].in + r.local * segments[i].speed;
+			return r;
+		}
+		acc += d;
+	}
+	if (t < acc + outroDuration()) {
+		r.kind = Locate::Outro;
+		r.local = t - acc;
+	}
+	return r;
+}
+
+bool EditProject::splitAt(double t)
+{
+	const Locate loc = locate(t);
+	if (loc.kind != Locate::Segment)
+		return false;
+	Segment &s = segments[loc.seg];
+	if (loc.srcTime - s.in < 0.1 || s.out - loc.srcTime < 0.1)
+		return false;
+	Segment right = s;
+	right.in = loc.srcTime;
+	right.transIn = Transition::None;
+	s.out = loc.srcTime;
+	segments.insert(loc.seg + 1, right);
+	return true;
+}
+
+void EditProject::moveSegment(int from, int to)
+{
+	if (from < 0 || from >= segments.size() || to < 0 || to >= segments.size() || from == to)
+		return;
+	segments.move(from, to);
+}
+
+// ─── 비트 ───────────────────────────────────────────────
+double EditProject::beatInterval() const
+{
+	if (music.path.isEmpty() || music.bpm <= 0)
+		return 0.0;
+	return 60.0 / music.bpm * std::max(1, music.beatEvery);
+}
+
+QVector<double> EditProject::beatTimes() const
+{
+	QVector<double> beats;
+	const double iv = beatInterval();
+	if (iv <= 0)
+		return beats;
+	// 결과 시간 t 에서 재생되는 음악 위치 = fileOffset + t
+	const double limit = totalDuration() + 30.0;
+	double t = music.firstBeat - music.fileOffset;
+	if (t < 0)
+		t += std::ceil(-t / iv) * iv;
+	for (; t <= limit && beats.size() < 5000; t += iv)
+		beats.push_back(t);
+	return beats;
+}
+
+double EditProject::nearestBeat(double t) const
+{
+	double best = -1.0;
+	for (double b : beatTimes())
+		if (best < 0 || std::abs(b - t) < std::abs(best - t))
+			best = b;
+	return best;
+}
+
+int EditProject::snapCutsToBeats()
+{
+	const QVector<double> beats = beatTimes();
+	if (beats.isEmpty())
+		return 0;
+
+	int changed = 0;
+	for (int i = 0; i < segments.size(); ++i) {
+		Segment &s = segments[i];
+		if (s.out <= s.in)
+			continue;
+		const double start = segmentStart(i);
+		const double end = start + s.outDuration();
+		const double srcMax = sources.value(s.source).duration > 0 ? sources[s.source].duration : s.out;
+
+		double best = -1.0;
+		for (double b : beats) {
+			if (b - start < 0.25) // 너무 짧은 컷 방지
+				continue;
+			const double newOut = s.in + (b - start) * s.speed;
+			if (newOut > srcMax + 1e-6)
+				break;
+			if (best < 0 || std::abs(b - end) < std::abs(best - end))
+				best = b;
+		}
+		if (best >= 0 && std::abs(best - end) > 0.005) {
+			s.out = s.in + (best - start) * s.speed;
+			++changed;
+		}
+	}
+	return changed;
+}
+
+// ─── 저장/불러오기 ─────────────────────────────────────
+static QJsonObject cardToJson(const TitleCard &c)
+{
+	return QJsonObject{{"enabled", c.enabled}, {"duration", c.duration}, {"title", c.title},
+			   {"subtitle", c.subtitle}, {"background", c.background.name()},
+			   {"color", c.color.name()}};
+}
+
+static TitleCard cardFromJson(const QJsonObject &o)
+{
+	TitleCard c;
+	c.enabled = o.value("enabled").toBool();
+	c.duration = std::clamp(o.value("duration").toDouble(2.0), 0.5, 10.0);
+	c.title = o.value("title").toString();
+	c.subtitle = o.value("subtitle").toString();
+	c.background = QColor(o.value("background").toString("#000000"));
+	c.color = QColor(o.value("color").toString("#ffffff"));
+	return c;
+}
+
+QJsonObject EditProject::toJson() const
+{
+	QJsonArray src;
+	for (const SourceClip &c : sources)
+		src.append(QJsonObject{{"path", c.path}, {"duration", c.duration}, {"w", c.size.width()},
+				       {"h", c.size.height()}, {"hasAudio", c.hasAudio}});
+
+	QJsonArray segs;
+	for (const Segment &s : segments)
+		segs.append(QJsonObject{
+			{"source", s.source}, {"in", s.in}, {"out", s.out}, {"speed", s.speed},
+			{"transIn", int(s.transIn)}, {"zoom", s.zoom}, {"shake", s.shake}, {"gray", s.gray},
+			{"vivid", s.vivid}, {"vignette", s.vignette}});
+
+	QJsonArray subs;
+	for (const Subtitle &s : subtitles)
+		subs.append(QJsonObject{{"start", s.start}, {"end", s.end}, {"text", s.text},
+					{"fontSize", s.fontSize}, {"color", s.color.name()}, {"y", s.y},
+					{"box", s.box}});
+
+	const QJsonObject mus{{"path", music.path},       {"fileOffset", music.fileOffset},
+			      {"volume", music.volume},   {"bpm", music.bpm},
+			      {"firstBeat", music.firstBeat}, {"beatEvery", music.beatEvery},
+			      {"fadeOut", music.fadeOut}};
+
+	return QJsonObject{
+		{"version", 2},
+		{"sources", src},
+		{"segments", segs},
+		{"subtitles", subs},
+		{"intro", cardToJson(intro)},
+		{"outro", cardToJson(outro)},
+		{"music", mus},
+		{"gameVolume", gameVolume},
+		{"layout", int(layout)},
+		{"minimap", QJsonArray{minimapRect.x(), minimapRect.y(), minimapRect.width(), minimapRect.height()}},
+	};
+}
+
+void EditProject::fromJson(const QJsonObject &o)
+{
+	sources.clear();
+	for (const QJsonValue &v : o.value("sources").toArray()) {
+		const QJsonObject j = v.toObject();
+		SourceClip c;
+		c.path = j.value("path").toString();
+		c.duration = j.value("duration").toDouble();
+		c.size = QSize(j.value("w").toInt(1920), j.value("h").toInt(1080));
+		c.hasAudio = j.value("hasAudio").toBool(true);
+		sources.push_back(c);
+	}
+
+	segments.clear();
+	for (const QJsonValue &v : o.value("segments").toArray()) {
+		const QJsonObject j = v.toObject();
+		Segment s;
+		s.source = j.value("source").toInt();
+		if (s.source < 0 || s.source >= sources.size())
+			continue;
+		s.in = j.value("in").toDouble();
+		s.out = j.value("out").toDouble(-1);
+		s.speed = std::clamp(j.value("speed").toDouble(1.0), 0.25, 4.0);
+		s.transIn = Transition(std::clamp(j.value("transIn").toInt(), 0, kTransitionCount - 1));
+		s.zoom = j.value("zoom").toBool();
+		s.shake = j.value("shake").toBool();
+		s.gray = j.value("gray").toBool();
+		s.vivid = j.value("vivid").toBool();
+		s.vignette = j.value("vignette").toBool();
+		segments.push_back(s);
+	}
+
+	subtitles.clear();
+	for (const QJsonValue &v : o.value("subtitles").toArray()) {
+		const QJsonObject j = v.toObject();
+		Subtitle s;
+		s.start = j.value("start").toDouble();
+		s.end = j.value("end").toDouble(s.start + 2.0);
+		s.text = j.value("text").toString();
+		s.fontSize = j.value("fontSize").toInt(72);
+		s.color = QColor(j.value("color").toString("#ffffff"));
+		s.y = std::clamp(j.value("y").toDouble(0.72), 0.0, 1.0);
+		s.box = j.value("box").toBool(true);
+		subtitles.push_back(s);
+	}
+
+	intro = cardFromJson(o.value("intro").toObject());
+	outro = cardFromJson(o.value("outro").toObject());
+
+	const QJsonObject m = o.value("music").toObject();
+	music.path = m.value("path").toString();
+	music.fileOffset = std::max(0.0, m.value("fileOffset").toDouble());
+	music.volume = std::clamp(m.value("volume").toDouble(0.9), 0.0, 2.0);
+	music.bpm = m.value("bpm").toDouble();
+	music.firstBeat = m.value("firstBeat").toDouble();
+	music.beatEvery = std::clamp(m.value("beatEvery").toInt(1), 1, 8);
+	music.fadeOut = m.value("fadeOut").toBool(true);
+
+	gameVolume = std::clamp(o.value("gameVolume").toDouble(1.0), 0.0, 2.0);
+	layout = ShortsLayout(std::clamp(o.value("layout").toInt(0), 0, 2));
+	const QJsonArray mm = o.value("minimap").toArray();
+	if (mm.size() == 4)
+		minimapRect = QRectF(mm[0].toDouble(), mm[1].toDouble(), mm[2].toDouble(), mm[3].toDouble());
+}
+
+bool EditProject::save() const
+{
+	if (filePath.isEmpty())
+		return false;
+	QFile f(filePath);
+	if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+		return false;
+	f.write(QJsonDocument(toJson()).toJson(QJsonDocument::Indented));
+	return true;
+}
+
+bool EditProject::load(const QString &path)
+{
+	QFile f(path);
+	if (!f.open(QIODevice::ReadOnly))
+		return false;
+	const QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+	if (!doc.isObject())
+		return false;
+	filePath = path;
+	fromJson(doc.object());
+	return true;
+}

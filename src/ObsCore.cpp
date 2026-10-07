@@ -1,0 +1,424 @@
+#include "ObsCore.h"
+
+#include <QCoreApplication>
+#include <QDir>
+#include <QGuiApplication>
+#include <QScreen>
+#include <QStandardPaths>
+#include <QStringList>
+#include <QThread>
+
+#include <graphics/vec2.h>
+
+namespace {
+// OBS 기본 채널 배치와 맞춤: 0 = 씬, 1 = 데스크톱 오디오, 3 = 마이크
+constexpr uint32_t kChannelScene = 0;
+constexpr uint32_t kChannelDesktop = 1;
+constexpr uint32_t kChannelMic = 3;
+
+QByteArray u8(const QString &s) { return s.toUtf8(); }
+} // namespace
+
+ObsCore::ObsCore(QObject *parent) : QObject(parent) {}
+
+ObsCore::~ObsCore() { shutdown(); }
+
+bool ObsCore::startup(QString *error)
+{
+	if (m_started)
+		return true;
+
+	// libobs는 data/, obs-plugins/ 를 현재 작업 폴더 기준 상대경로(../../)로 찾으므로
+	// 실행 파일 폴더(bin/64bit)를 작업 폴더로 맞춰 둡니다.
+	QDir::setCurrent(QCoreApplication::applicationDirPath());
+
+	const QString cfg = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation) +
+			    "/obs-module-config";
+	QDir().mkpath(cfg);
+
+	if (!obs_startup("ko-KR", u8(cfg).constData(), nullptr)) {
+		*error = "obs_startup 실패";
+		return false;
+	}
+	m_started = true;
+
+	if (!resetAudio()) {
+		*error = "오디오 초기화 실패";
+		return false;
+	}
+	if (!resetVideo(error))
+		return false;
+
+	// 플러그인 로드 (win-capture, win-wasapi, obs-x264, obs-nvenc, obs-ffmpeg, obs-outputs ...)
+	obs_load_all_modules();
+	obs_post_load_modules();
+	obs_log_loaded_modules();
+
+	createScene();
+	emit logMessage(QString("OBS 초기화 완료 (%1x%2)").arg(m_baseW).arg(m_baseH));
+	return true;
+}
+
+bool ObsCore::resetAudio()
+{
+	obs_audio_info ai = {};
+	ai.samples_per_sec = 48000;
+	ai.speakers = SPEAKERS_STEREO;
+	return obs_reset_audio(&ai);
+}
+
+bool ObsCore::resetVideo(QString *error)
+{
+	QScreen *screen = QGuiApplication::primaryScreen();
+	const qreal dpr = screen ? screen->devicePixelRatio() : 1.0;
+	if (screen) {
+		m_baseW = uint32_t(screen->size().width() * dpr) & ~1u;
+		m_baseH = uint32_t(screen->size().height() * dpr) & ~1u;
+	}
+
+	obs_video_info vi = {};
+	vi.graphics_module = "libobs-d3d11";
+	vi.fps_num = 60;
+	vi.fps_den = 1;
+	vi.base_width = m_baseW;
+	vi.base_height = m_baseH;
+	// 세로 크롭 시 화질 손실을 줄이려고 출력 해상도 = 원본 해상도로 녹화
+	vi.output_width = m_baseW;
+	vi.output_height = m_baseH;
+	vi.output_format = VIDEO_FORMAT_NV12;
+	vi.colorspace = VIDEO_CS_709;
+	vi.range = VIDEO_RANGE_PARTIAL;
+	vi.adapter = 0;
+	vi.gpu_conversion = true;
+	vi.scale_type = OBS_SCALE_BICUBIC;
+
+	const int r = obs_reset_video(&vi);
+	if (r != OBS_VIDEO_SUCCESS) {
+		*error = QString("obs_reset_video 실패 (코드 %1). D3D11 지원 GPU 드라이버를 확인하세요.").arg(r);
+		return false;
+	}
+	return true;
+}
+
+void ObsCore::createScene()
+{
+	m_scene = obs_scene_create("ERShorts Scene");
+	obs_set_output_source(kChannelScene, obs_scene_get_source(m_scene));
+}
+
+void ObsCore::rebuildCaptureSource()
+{
+	if (m_captureItem) {
+		obs_sceneitem_remove(m_captureItem);
+		m_captureItem = nullptr;
+	}
+	if (m_capture) {
+		obs_source_release(m_capture);
+		m_capture = nullptr;
+	}
+
+	obs_data_t *s = obs_data_create();
+	const char *id = nullptr;
+
+	if (m_settings.captureMode == CaptureMode::Game) {
+		id = "game_capture";
+		if (m_settings.gameWindow.trimmed().isEmpty()) {
+			obs_data_set_string(s, "capture_mode", "any_fullscreen");
+		} else {
+			// 형식: "창제목:창클래스:실행파일.exe" (OBS 게임 캡처의 window 문자열과 동일)
+			obs_data_set_string(s, "capture_mode", "window");
+			obs_data_set_string(s, "window", u8(m_settings.gameWindow).constData());
+			obs_data_set_int(s, "priority", 2); // 실행파일 이름 우선 매칭
+		}
+		obs_data_set_bool(s, "capture_cursor", false);
+		obs_data_set_bool(s, "allow_transparency", false);
+	} else {
+		id = "monitor_capture"; // 게임 캡처가 막힐 때의 대안 (화면 전체 캡처)
+		obs_data_set_bool(s, "capture_cursor", false);
+	}
+
+	m_capture = obs_source_create(id, "Game", s, nullptr);
+	obs_data_release(s);
+
+	if (!m_capture) {
+		emit logMessage(QString("캡처 소스 생성 실패: %1 (win-capture 플러그인 확인)").arg(id));
+		return;
+	}
+
+	m_captureItem = obs_scene_add(m_scene, m_capture);
+
+	// 해상도가 달라도 화면에 꽉 맞게
+	vec2 bounds;
+	vec2_set(&bounds, float(m_baseW), float(m_baseH));
+	obs_sceneitem_set_bounds_type(m_captureItem, OBS_BOUNDS_SCALE_INNER);
+	obs_sceneitem_set_bounds_alignment(m_captureItem, OBS_ALIGN_CENTER);
+	obs_sceneitem_set_bounds(m_captureItem, &bounds);
+
+	emit logMessage(m_settings.captureMode == CaptureMode::Game ? "게임 캡처 소스 준비됨"
+								     : "모니터 캡처 소스 준비됨");
+}
+
+void ObsCore::rebuildAudioSources()
+{
+	obs_set_output_source(kChannelDesktop, nullptr);
+	obs_set_output_source(kChannelMic, nullptr);
+	if (m_desktopAudio) {
+		obs_source_release(m_desktopAudio);
+		m_desktopAudio = nullptr;
+	}
+	if (m_micAudio) {
+		obs_source_release(m_micAudio);
+		m_micAudio = nullptr;
+	}
+
+	obs_data_t *s = obs_data_create();
+	obs_data_set_string(s, "device_id", "default");
+
+	m_desktopAudio = obs_source_create("wasapi_output_capture", "Desktop Audio", s, nullptr);
+	if (m_desktopAudio)
+		obs_set_output_source(kChannelDesktop, m_desktopAudio);
+
+	if (m_settings.captureMic) {
+		m_micAudio = obs_source_create("wasapi_input_capture", "Mic", s, nullptr);
+		if (m_micAudio)
+			obs_set_output_source(kChannelMic, m_micAudio);
+	}
+	obs_data_release(s);
+}
+
+QString ObsCore::pickVideoEncoder() const
+{
+	// 게임 성능에 영향이 적은 하드웨어 인코더 우선
+	static const char *preferred[] = {
+		"obs_nvenc_h264_tex", // NVIDIA (OBS 31+)
+		"jim_nvenc",          // NVIDIA (OBS 30 이하)
+		"h264_texture_amf",   // AMD
+		"obs_qsv11_v2",       // Intel
+		"obs_x264",           // CPU (최후 수단)
+	};
+
+	QStringList available;
+	const char *id = nullptr;
+	for (size_t i = 0; obs_enum_encoder_types(i, &id); ++i)
+		available << QString::fromUtf8(id);
+
+	for (const char *p : preferred)
+		if (available.contains(p))
+			return p;
+	return "obs_x264";
+}
+
+bool ObsCore::createEncodersAndOutput(QString *error)
+{
+	releaseOutput();
+
+	m_videoEncoderId = pickVideoEncoder();
+	const bool isX264 = (m_videoEncoderId == "obs_x264");
+
+	obs_data_t *vs = obs_data_create();
+	obs_data_set_int(vs, "keyint_sec", 1); // 키프레임 1초: 클립 자르기가 정확해짐
+	if (isX264) {
+		obs_data_set_string(vs, "rate_control", "CRF");
+		obs_data_set_int(vs, "crf", 20);
+		obs_data_set_string(vs, "preset", "veryfast");
+	} else {
+		obs_data_set_string(vs, "rate_control", "CQP");
+		obs_data_set_int(vs, "cqp", 20);
+		obs_data_set_string(vs, "preset2", "p5");
+	}
+	m_venc = obs_video_encoder_create(u8(m_videoEncoderId).constData(), "Replay Video", vs, nullptr);
+	obs_data_release(vs);
+	if (!m_venc) {
+		*error = "비디오 인코더 생성 실패: " + m_videoEncoderId;
+		return false;
+	}
+	obs_encoder_set_video(m_venc, obs_get_video());
+
+	obs_data_t *as = obs_data_create();
+	obs_data_set_int(as, "bitrate", 192);
+	m_aenc = obs_audio_encoder_create("ffmpeg_aac", "Replay Audio", as, 0, nullptr);
+	obs_data_release(as);
+	if (!m_aenc) {
+		*error = "오디오 인코더(ffmpeg_aac) 생성 실패";
+		return false;
+	}
+	obs_encoder_set_audio(m_aenc, obs_get_audio());
+
+	QDir().mkpath(m_settings.outputDir);
+	obs_data_t *os = obs_data_create();
+	obs_data_set_string(os, "directory", u8(m_settings.outputDir).constData());
+	obs_data_set_string(os, "format", "ER_%CCYY-%MM-%DD_%hh-%mm-%ss");
+	obs_data_set_string(os, "extension", "mp4");
+	obs_data_set_int(os, "max_time_sec", m_settings.bufferSeconds);
+	obs_data_set_int(os, "max_size_mb", m_settings.maxBufferMB);
+	m_replay = obs_output_create("replay_buffer", "Replay Buffer", os, nullptr);
+	obs_data_release(os);
+	if (!m_replay) {
+		*error = "replay_buffer 출력 생성 실패 (obs-ffmpeg 플러그인 확인)";
+		return false;
+	}
+
+	obs_output_set_video_encoder(m_replay, m_venc);
+	obs_output_set_audio_encoder(m_replay, m_aenc, 0);
+
+	signal_handler_t *sh = obs_output_get_signal_handler(m_replay);
+	signal_handler_connect(sh, "saved", &ObsCore::onReplaySaved, this);
+	signal_handler_connect(sh, "stop", &ObsCore::onReplayStopped, this);
+
+	emit logMessage("비디오 인코더: " + m_videoEncoderId);
+	return true;
+}
+
+bool ObsCore::applySettings(const Settings &s, QString *error)
+{
+	const bool wasActive = isReplayActive();
+	if (wasActive)
+		stopReplayBuffer();
+
+	m_settings = s;
+	if (m_settings.outputDir.isEmpty())
+		m_settings.outputDir =
+			QStandardPaths::writableLocation(QStandardPaths::MoviesLocation) + "/ERShorts";
+
+	rebuildCaptureSource();
+	rebuildAudioSources();
+	if (!createEncodersAndOutput(error))
+		return false;
+
+	if (wasActive)
+		return startReplayBuffer(error);
+	return true;
+}
+
+bool ObsCore::startReplayBuffer(QString *error)
+{
+	if (!m_replay) {
+		*error = "리플레이 버퍼가 준비되지 않았습니다";
+		return false;
+	}
+	if (obs_output_active(m_replay))
+		return true;
+
+	if (!obs_output_start(m_replay)) {
+		const char *e = obs_output_get_last_error(m_replay);
+		*error = QString("리플레이 버퍼 시작 실패: %1").arg(e ? QString::fromUtf8(e) : "알 수 없음");
+		return false;
+	}
+	emit replayStateChanged(true);
+	emit logMessage(QString("리플레이 버퍼 시작 (최근 %1초 유지)").arg(m_settings.bufferSeconds));
+	return true;
+}
+
+void ObsCore::stopReplayBuffer()
+{
+	if (!m_replay || !obs_output_active(m_replay))
+		return;
+	obs_output_stop(m_replay);
+	for (int i = 0; i < 60 && obs_output_active(m_replay); ++i)
+		QThread::msleep(50);
+	if (obs_output_active(m_replay))
+		obs_output_force_stop(m_replay);
+}
+
+bool ObsCore::isReplayActive() const
+{
+	return m_replay && obs_output_active(m_replay);
+}
+
+bool ObsCore::saveReplay()
+{
+	if (!isReplayActive())
+		return false;
+	calldata_t cd = {};
+	proc_handler_t *ph = obs_output_get_proc_handler(m_replay);
+	proc_handler_call(ph, "save", &cd);
+	calldata_free(&cd);
+	emit logMessage("클립 저장 중...");
+	return true;
+}
+
+// libobs 내부 스레드에서 호출되므로 Qt 메인 스레드로 넘겨서 처리
+void ObsCore::onReplaySaved(void *data, calldata_t *)
+{
+	auto *self = static_cast<ObsCore *>(data);
+
+	calldata_t cd = {};
+	proc_handler_t *ph = obs_output_get_proc_handler(self->m_replay);
+	proc_handler_call(ph, "get_last_replay", &cd);
+	const char *p = calldata_string(&cd, "path");
+	const QString path = p ? QString::fromUtf8(p) : QString();
+	calldata_free(&cd);
+
+	QMetaObject::invokeMethod(self, [self, path] { emit self->clipSaved(path); }, Qt::QueuedConnection);
+}
+
+void ObsCore::onReplayStopped(void *data, calldata_t *cd)
+{
+	auto *self = static_cast<ObsCore *>(data);
+	const int code = int(calldata_int(cd, "code"));
+	QMetaObject::invokeMethod(
+		self,
+		[self, code] {
+			emit self->replayStateChanged(false);
+			if (code != OBS_OUTPUT_SUCCESS)
+				emit self->logMessage(QString("리플레이 버퍼가 비정상 종료됨 (코드 %1)").arg(code));
+			else
+				emit self->logMessage("리플레이 버퍼 중지");
+		},
+		Qt::QueuedConnection);
+}
+
+void ObsCore::releaseOutput()
+{
+	if (m_replay) {
+		stopReplayBuffer();
+		signal_handler_t *sh = obs_output_get_signal_handler(m_replay);
+		signal_handler_disconnect(sh, "saved", &ObsCore::onReplaySaved, this);
+		signal_handler_disconnect(sh, "stop", &ObsCore::onReplayStopped, this);
+		obs_output_release(m_replay);
+		m_replay = nullptr;
+	}
+	if (m_venc) {
+		obs_encoder_release(m_venc);
+		m_venc = nullptr;
+	}
+	if (m_aenc) {
+		obs_encoder_release(m_aenc);
+		m_aenc = nullptr;
+	}
+}
+
+void ObsCore::shutdown()
+{
+	if (!m_started)
+		return;
+
+	releaseOutput();
+
+	for (uint32_t ch = 0; ch < MAX_CHANNELS; ++ch)
+		obs_set_output_source(ch, nullptr);
+
+	if (m_captureItem) {
+		obs_sceneitem_remove(m_captureItem);
+		m_captureItem = nullptr;
+	}
+	if (m_capture) {
+		obs_source_release(m_capture);
+		m_capture = nullptr;
+	}
+	if (m_desktopAudio) {
+		obs_source_release(m_desktopAudio);
+		m_desktopAudio = nullptr;
+	}
+	if (m_micAudio) {
+		obs_source_release(m_micAudio);
+		m_micAudio = nullptr;
+	}
+	if (m_scene) {
+		obs_scene_release(m_scene);
+		m_scene = nullptr;
+	}
+
+	obs_shutdown();
+	m_started = false;
+}

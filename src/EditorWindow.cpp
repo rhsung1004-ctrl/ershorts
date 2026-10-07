@@ -1,0 +1,1561 @@
+#include "EditorWindow.h"
+
+#include "BeatDetector.h"
+#include "ShortsExporter.h"
+#include "TimelineWidget.h"
+
+#include <QAudioOutput>
+#include <QCheckBox>
+#include <QCloseEvent>
+#include <QColorDialog>
+#include <QComboBox>
+#include <QDesktopServices>
+#include <QDir>
+#include <QDoubleSpinBox>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QFormLayout>
+#include <QGraphicsRectItem>
+#include <QGraphicsScene>
+#include <QGraphicsSimpleTextItem>
+#include <QGraphicsVideoItem>
+#include <QGraphicsView>
+#include <QGridLayout>
+#include <QGroupBox>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
+#include <QMediaPlayer>
+#include <QMessageBox>
+#include <QPlainTextEdit>
+#include <QProgressBar>
+#include <QPushButton>
+#include <QRandomGenerator>
+#include <QRegularExpression>
+#include <QScrollArea>
+#include <QShortcut>
+#include <QSlider>
+#include <QSpinBox>
+#include <QStatusBar>
+#include <QSplitter>
+#include <QTabWidget>
+#include <QTimer>
+#include <QUrl>
+#include <QVBoxLayout>
+
+#include <algorithm>
+#include <cmath>
+
+namespace {
+constexpr double kCanvasW = 1080.0;
+constexpr double kCanvasH = 1920.0;
+
+const QColor kClipColors[] = {QColor("#3E63DD"), QColor("#2F9E6B"), QColor("#D6409F"),
+			      QColor("#E5932E"), QColor("#12A594"), QColor("#8E4EC6"),
+			      QColor("#E5484D"), QColor("#0090FF")};
+
+QString fmt(double t)
+{
+	if (t < 0)
+		return "--:--.-";
+	const int m = int(t) / 60;
+	return QString("%1:%2").arg(m).arg(t - m * 60, 4, 'f', 1, QChar('0'));
+}
+
+class FitView : public QGraphicsView {
+public:
+	using QGraphicsView::QGraphicsView;
+
+protected:
+	void resizeEvent(QResizeEvent *e) override
+	{
+		QGraphicsView::resizeEvent(e);
+		fitInView(sceneRect(), Qt::KeepAspectRatio);
+	}
+	void showEvent(QShowEvent *e) override
+	{
+		QGraphicsView::showEvent(e);
+		fitInView(sceneRect(), Qt::KeepAspectRatio);
+	}
+};
+
+const QVector<QPair<QString, double>> kSpeeds = {
+	{"0.25x (아주 느리게)", 0.25}, {"0.5x (슬로우)", 0.5}, {"0.75x", 0.75}, {"1x (원속도)", 1.0},
+	{"1.25x", 1.25},           {"1.5x", 1.5},         {"2x (빠르게)", 2.0}, {"3x", 3.0},
+};
+
+QWidget *scrollable(QWidget *content)
+{
+	auto *sa = new QScrollArea;
+	sa->setWidget(content);
+	sa->setWidgetResizable(true);
+	sa->setFrameShape(QFrame::NoFrame);
+	return sa;
+}
+
+QLabel *helpLabel(const QString &text)
+{
+	auto *l = new QLabel(text);
+	l->setWordWrap(true);
+	l->setStyleSheet("color:#9a9aa5; font-size:11px;");
+	return l;
+}
+} // namespace
+
+// ═════════════════════════════════════════════════════════════
+// 생성
+// ═════════════════════════════════════════════════════════════
+EditorWindow::EditorWindow(const QString &projectPath, const QStringList &newClips, const QString &clipsDir,
+			   const QString &shortsDir, QWidget *parent)
+	: QMainWindow(parent), m_clipsDir(clipsDir), m_shortsDir(shortsDir)
+{
+	setAttribute(Qt::WA_DeleteOnClose);
+	resize(1360, 900);
+
+	if (!m_project.load(projectPath))
+		m_project.filePath = projectPath;
+	for (const QString &c : newClips)
+		m_project.addSource(c);
+	setWindowTitle("매드무비 편집 — " + QFileInfo(projectPath).completeBaseName());
+
+	m_exporter = new ShortsExporter(this);
+	m_beats = new BeatDetector(this);
+
+	m_bgm = new QMediaPlayer(this);
+	m_bgmAudio = new QAudioOutput(this);
+	m_bgm->setAudioOutput(m_bgmAudio);
+
+	m_tickTimer = new QTimer(this);
+	m_tickTimer->setInterval(20);
+	connect(m_tickTimer, &QTimer::timeout, this, &EditorWindow::tick);
+
+	m_saveTimer = new QTimer(this);
+	m_saveTimer->setSingleShot(true);
+	m_saveTimer->setInterval(800);
+	connect(m_saveTimer, &QTimer::timeout, this, [this] { m_project.save(); });
+
+	buildUi();
+	setupShortcuts();
+
+	for (int i = 0; i < m_project.sources.size(); ++i)
+		createPlayerFor(i);
+	if (!m_project.music.path.isEmpty())
+		m_bgm->setSource(QUrl::fromLocalFile(m_project.music.path));
+
+	connect(m_exporter, &ShortsExporter::logMessage, this, &EditorWindow::log);
+	connect(m_exporter, &ShortsExporter::progress, m_progress, &QProgressBar::setValue);
+	connect(m_exporter, &ShortsExporter::finished, this, [this](bool ok, const QString &path) {
+		m_exportBtn->setText("쇼츠로 내보내기");
+		if (ok)
+			QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+		else
+			m_progress->setValue(0);
+	});
+	connect(m_beats, &BeatDetector::finished, this,
+		[this](bool ok, double bpm, double firstBeat, const QString &msg) {
+			m_detectBtn->setEnabled(true);
+			m_beatStatus->setText(msg);
+			if (!ok)
+				return;
+			m_project.music.bpm = bpm;
+			m_project.music.firstBeat = firstBeat;
+			m_syncing = true;
+			m_bpm->setValue(bpm);
+			m_firstBeat->setValue(firstBeat);
+			m_syncing = false;
+			projectChanged();
+		});
+
+	loadUiFromProject();
+	m_project.save();
+	m_tickTimer->start();
+}
+
+EditorWindow::~EditorWindow() { m_project.save(); }
+
+// ═════════════════════════════════════════════════════════════
+// UI 구성
+// ═════════════════════════════════════════════════════════════
+void EditorWindow::buildUi()
+{
+	auto *central = new QWidget;
+	auto *root = new QVBoxLayout(central);
+	setCentralWidget(central);
+
+	auto *split = new QSplitter;
+	root->addWidget(split, 1);
+
+	// ── 왼쪽: 9:16 미리보기 ───────────────
+	auto *left = new QWidget;
+	auto *leftLay = new QVBoxLayout(left);
+	leftLay->setContentsMargins(0, 0, 0, 0);
+
+	m_scene = new QGraphicsScene(this);
+	m_scene->setSceneRect(0, 0, kCanvasW, kCanvasH);
+
+	m_canvas = new QGraphicsRectItem(0, 0, kCanvasW, kCanvasH);
+	m_canvas->setBrush(QColor("#111114"));
+	m_canvas->setPen(Qt::NoPen);
+	m_canvas->setFlag(QGraphicsItem::ItemClipsChildrenToShape);
+	m_scene->addItem(m_canvas);
+
+	m_minimapHint = new QGraphicsRectItem(m_canvas);
+	m_minimapHint->setPen(QPen(QColor(255, 255, 255, 200), 4, Qt::DashLine));
+	m_minimapHint->setZValue(5);
+
+	m_flashOverlay = new QGraphicsRectItem(0, 0, kCanvasW, kCanvasH, m_canvas);
+	m_flashOverlay->setPen(Qt::NoPen);
+	m_flashOverlay->setZValue(8);
+	m_flashOverlay->setVisible(false);
+
+	m_cardItem = new QGraphicsRectItem(0, 0, kCanvasW, kCanvasH, m_canvas);
+	m_cardItem->setPen(Qt::NoPen);
+	m_cardItem->setZValue(9);
+	m_cardTitle = new QGraphicsSimpleTextItem(m_cardItem);
+	m_cardSub = new QGraphicsSimpleTextItem(m_cardItem);
+	m_cardItem->setVisible(false);
+
+	m_effectBadge = new QGraphicsSimpleTextItem(m_canvas);
+	QFont badgeFont("Malgun Gothic");
+	badgeFont.setPixelSize(34);
+	badgeFont.setBold(true);
+	m_effectBadge->setFont(badgeFont);
+	m_effectBadge->setBrush(QColor("#FFD84D"));
+	m_effectBadge->setPen(QPen(Qt::black, 2));
+	m_effectBadge->setPos(30, 30);
+	m_effectBadge->setZValue(20);
+
+	m_view = new FitView(m_scene);
+	m_view->setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform);
+	m_view->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+	m_view->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+	m_view->setFrameShape(QFrame::NoFrame);
+	m_view->setBackgroundBrush(QColor("#0B0B0D"));
+	m_view->setMinimumSize(300, 480);
+	leftLay->addWidget(m_view, 1);
+
+	auto *ctrl = new QHBoxLayout;
+	auto *homeBtn = new QPushButton("⏮");
+	auto *backBtn = new QPushButton("⏪ 1초");
+	m_playBtn = new QPushButton("▶ 재생");
+	m_playBtn->setMinimumWidth(100);
+	auto *fwdBtn = new QPushButton("1초 ⏩");
+	ctrl->addWidget(homeBtn);
+	ctrl->addWidget(backBtn);
+	ctrl->addWidget(m_playBtn);
+	ctrl->addWidget(fwdBtn);
+	ctrl->addStretch();
+	leftLay->addLayout(ctrl);
+	m_timeLabel = new QLabel;
+	leftLay->addWidget(m_timeLabel);
+	connect(homeBtn, &QPushButton::clicked, this, [this] { seek(0); });
+	connect(backBtn, &QPushButton::clicked, this, [this] { seek(position() - 1.0); });
+	connect(fwdBtn, &QPushButton::clicked, this, [this] { seek(position() + 1.0); });
+	connect(m_playBtn, &QPushButton::clicked, this, &EditorWindow::togglePlay);
+	split->addWidget(left);
+
+	// ── 오른쪽: 탭 ──────────────────────
+	m_tabs = new QTabWidget;
+	m_tabs->setMinimumWidth(400);
+	m_tabs->addTab(scrollable(buildClipTab()), "클립");
+	m_tabs->addTab(scrollable(buildSegmentTab()), "구간·효과");
+	m_tabs->addTab(scrollable(buildMusicTab()), "음악");
+	m_tabs->addTab(scrollable(buildSubtitleTab()), "자막");
+	m_tabs->addTab(scrollable(buildCardTab()), "인트로/아웃트로");
+	m_tabs->addTab(scrollable(buildExportTab()), "내보내기");
+	split->addWidget(m_tabs);
+	split->setStretchFactor(0, 1);
+	split->setSizes({600, 460});
+
+	// ── 아래: 타임라인 ──────────────────
+	m_timeline = new TimelineWidget;
+	m_timeline->setProject(&m_project);
+	root->addWidget(m_timeline);
+
+	connect(m_timeline, &TimelineWidget::seekRequested, this, &EditorWindow::seek);
+	connect(m_timeline, &TimelineWidget::segmentSelected, this, [this](int i) {
+		selectSegment(i);
+		if (i >= 0)
+			m_tabs->setCurrentIndex(1);
+	});
+	connect(m_timeline, &TimelineWidget::subtitleSelected, this, [this](int i) {
+		selectSubtitle(i);
+		m_tabs->setCurrentIndex(3);
+	});
+	connect(m_timeline, &TimelineWidget::cardClicked, this, [this](int) { m_tabs->setCurrentIndex(4); });
+	connect(m_timeline, &TimelineWidget::segmentsEdited, this, [this] {
+		selectSegment(m_timeline->selectedSegment());
+		projectChanged();
+	});
+
+	root->addWidget(helpLabel(
+		"Space 재생/정지 · S 자르기 · B 선택 구간을 비트마다 자르기 · Delete 구간 삭제 · Ctrl+D 복제 · "
+		"T 자막 추가 · ←/→ 1초 · ,/. 0.1초 · 선택한 구간을 다시 잡고 끌면 순서 변경"));
+}
+
+QWidget *EditorWindow::buildClipTab()
+{
+	auto *w = new QWidget;
+	auto *lay = new QVBoxLayout(w);
+	lay->addWidget(helpLabel("이 영상에 쓰는 클립 목록입니다. 추가한 클립은 타임라인 끝에 통째로 붙고, "
+				 "필요 없는 부분은 '구간·효과' 탭에서 잘라내면 됩니다."));
+
+	m_clipList = new QListWidget;
+	m_clipList->setMinimumHeight(220);
+	lay->addWidget(m_clipList);
+
+	auto *row = new QHBoxLayout;
+	auto *addBtn = new QPushButton("＋ 클립 추가");
+	auto *appendBtn = new QPushButton("타임라인에 다시 넣기");
+	auto *removeBtn = new QPushButton("타임라인에서 빼기");
+	row->addWidget(addBtn);
+	row->addWidget(appendBtn);
+	row->addWidget(removeBtn);
+	lay->addLayout(row);
+	lay->addStretch();
+
+	connect(addBtn, &QPushButton::clicked, this, &EditorWindow::addClips);
+	connect(appendBtn, &QPushButton::clicked, this, [this] {
+		const int i = m_clipList->currentRow();
+		if (i < 0 || i >= m_project.sources.size())
+			return;
+		Segment s;
+		s.source = i;
+		s.out = m_project.sources[i].duration > 0 ? m_project.sources[i].duration : -1.0;
+		s.transIn = m_project.segments.isEmpty() ? Transition::None : Transition::Flash;
+		m_project.segments.push_back(s);
+		projectChanged();
+	});
+	connect(removeBtn, &QPushButton::clicked, this, [this] {
+		const int i = m_clipList->currentRow();
+		if (i < 0)
+			return;
+		m_project.segments.erase(std::remove_if(m_project.segments.begin(), m_project.segments.end(),
+							[i](const Segment &s) { return s.source == i; }),
+					 m_project.segments.end());
+		selectSegment(-1);
+		projectChanged();
+	});
+	connect(m_clipList, &QListWidget::itemDoubleClicked, this, [this] {
+		// 해당 클립이 처음 나오는 위치로 이동
+		const int i = m_clipList->currentRow();
+		for (int k = 0; k < m_project.segments.size(); ++k)
+			if (m_project.segments[k].source == i) {
+				seek(m_project.segmentStart(k));
+				selectSegment(k);
+				return;
+			}
+	});
+	return w;
+}
+
+QWidget *EditorWindow::buildSegmentTab()
+{
+	auto *w = new QWidget;
+	auto *lay = new QVBoxLayout(w);
+	lay->addWidget(helpLabel("타임라인에서 구간을 클릭해 선택하세요. 양 끝을 드래그하면 길이 조절, "
+				 "선택된 구간을 다시 잡고 끌면 순서를 바꿀 수 있습니다."));
+
+	auto *grid = new QGridLayout;
+	auto *splitBtn = new QPushButton("✂ 여기서 자르기 (S)");
+	auto *beatSplitBtn = new QPushButton("♪ 비트마다 자르기 (B)");
+	auto *delBtn = new QPushButton("🗑 구간 삭제 (Del)");
+	auto *dupBtn = new QPushButton("⧉ 복제 (Ctrl+D)");
+	auto *leftBtn = new QPushButton("◀ 앞으로");
+	auto *rightBtn = new QPushButton("뒤로 ▶");
+	grid->addWidget(splitBtn, 0, 0);
+	grid->addWidget(beatSplitBtn, 0, 1);
+	grid->addWidget(delBtn, 1, 0);
+	grid->addWidget(dupBtn, 1, 1);
+	grid->addWidget(leftBtn, 2, 0);
+	grid->addWidget(rightBtn, 2, 1);
+	lay->addLayout(grid);
+	connect(splitBtn, &QPushButton::clicked, this, &EditorWindow::splitAtPlayhead);
+	connect(beatSplitBtn, &QPushButton::clicked, this, &EditorWindow::splitSelectedOnBeats);
+	connect(delBtn, &QPushButton::clicked, this, &EditorWindow::deleteSelectedSegment);
+	connect(dupBtn, &QPushButton::clicked, this, &EditorWindow::duplicateSelectedSegment);
+	connect(leftBtn, &QPushButton::clicked, this, [this] { moveSelected(-1); });
+	connect(rightBtn, &QPushButton::clicked, this, [this] { moveSelected(+1); });
+
+	auto *box = new QGroupBox("선택한 구간");
+	m_segProps = box;
+	auto *form = new QFormLayout(box);
+	m_segInfo = new QLabel("-");
+	m_segInfo->setWordWrap(true);
+	m_segSpeed = new QComboBox;
+	for (const auto &sp : kSpeeds)
+		m_segSpeed->addItem(sp.first, sp.second);
+	m_segTrans = new QComboBox;
+	for (int t = 0; t < kTransitionCount; ++t)
+		m_segTrans->addItem(transitionName(Transition(t)), t);
+	form->addRow("구간", m_segInfo);
+	form->addRow("배속", m_segSpeed);
+	form->addRow("들어올 때 전환", m_segTrans);
+
+	auto *fxGrid = new QGridLayout;
+	m_fxZoom = new QCheckBox("줌인 (1.3배)");
+	m_fxShake = new QCheckBox("화면 흔들림");
+	m_fxGray = new QCheckBox("흑백");
+	m_fxVivid = new QCheckBox("색감 강조 + 선명");
+	m_fxVignette = new QCheckBox("비네팅");
+	const QList<QCheckBox *> fx = {m_fxZoom, m_fxShake, m_fxGray, m_fxVivid, m_fxVignette};
+	for (int i = 0; i < fx.size(); ++i) {
+		fxGrid->addWidget(fx[i], i / 2, i % 2);
+		connect(fx[i], &QCheckBox::toggled, this, &EditorWindow::onSegmentPropsChanged);
+	}
+	form->addRow("효과", fxGrid);
+	connect(m_segSpeed, &QComboBox::currentIndexChanged, this, &EditorWindow::onSegmentPropsChanged);
+	connect(m_segTrans, &QComboBox::currentIndexChanged, this, &EditorWindow::onSegmentPropsChanged);
+
+	auto *allTrans = new QPushButton("이 전환을 모든 컷에 적용");
+	connect(allTrans, &QPushButton::clicked, this, [this] {
+		const Transition t = Transition(m_segTrans->currentData().toInt());
+		for (int i = 1; i < m_project.segments.size(); ++i)
+			m_project.segments[i].transIn = t;
+		projectChanged();
+		log("모든 컷의 전환: " + transitionName(t));
+	});
+	form->addRow(allTrans);
+	form->addRow(helpLabel("배속, 줌인, 전환은 미리보기에 바로 보이고, 흑백/선명/비네팅/흔들림은 내보낸 영상에서 적용됩니다."));
+
+	lay->addWidget(box);
+	lay->addStretch();
+	return w;
+}
+
+QWidget *EditorWindow::buildMusicTab()
+{
+	auto *w = new QWidget;
+	auto *lay = new QVBoxLayout(w);
+
+	auto *fileBox = new QGroupBox("배경음악 (BGM)");
+	auto *ff = new QFormLayout(fileBox);
+	m_musicFile = new QLabel("없음");
+	m_musicFile->setWordWrap(true);
+	auto *fileRow = new QHBoxLayout;
+	auto *pickBtn = new QPushButton("음악 파일 선택…");
+	auto *clearBtn = new QPushButton("제거");
+	fileRow->addWidget(pickBtn);
+	fileRow->addWidget(clearBtn);
+	ff->addRow("파일", m_musicFile);
+	ff->addRow(fileRow);
+
+	m_musicOffset = new QDoubleSpinBox;
+	m_musicOffset->setRange(0, 3600);
+	m_musicOffset->setDecimals(2);
+	m_musicOffset->setSingleStep(0.1);
+	m_musicOffset->setSuffix(" 초부터");
+	ff->addRow("음악 시작 위치", m_musicOffset);
+
+	m_musicVol = new QSlider(Qt::Horizontal);
+	m_musicVol->setRange(0, 150);
+	m_gameVol = new QSlider(Qt::Horizontal);
+	m_gameVol->setRange(0, 150);
+	ff->addRow("음악 볼륨", m_musicVol);
+	ff->addRow("게임 소리 볼륨", m_gameVol);
+	m_musicFade = new QCheckBox("끝날 때 음악 페이드 아웃");
+	ff->addRow(m_musicFade);
+	lay->addWidget(fileBox);
+
+	auto *beatBox = new QGroupBox("비트");
+	auto *bf = new QFormLayout(beatBox);
+	m_detectBtn = new QPushButton("BPM 자동 감지");
+	m_beatStatus = new QLabel;
+	m_beatStatus->setWordWrap(true);
+	bf->addRow(m_detectBtn, m_beatStatus);
+	m_bpm = new QDoubleSpinBox;
+	m_bpm->setRange(0, 260);
+	m_bpm->setDecimals(1);
+	m_bpm->setSpecialValueText("없음");
+	m_firstBeat = new QDoubleSpinBox;
+	m_firstBeat->setRange(0, 60);
+	m_firstBeat->setDecimals(3);
+	m_firstBeat->setSingleStep(0.01);
+	m_firstBeat->setSuffix(" 초");
+	bf->addRow("BPM", m_bpm);
+	bf->addRow("첫 박 위치 (음악 파일 기준)", m_firstBeat);
+	m_beatEvery = new QComboBox;
+	m_beatEvery->addItem("매 박", 1);
+	m_beatEvery->addItem("2박마다", 2);
+	m_beatEvery->addItem("4박마다 (1마디)", 4);
+	m_beatEvery->addItem("8박마다 (2마디)", 8);
+	bf->addRow("컷 간격", m_beatEvery);
+	m_snap = new QCheckBox("구간 끝을 끌 때 비트에 자석처럼 붙기");
+	m_snap->setChecked(true);
+	bf->addRow(m_snap);
+	auto *snapBtn = new QPushButton("모든 컷을 비트에 맞추기");
+	snapBtn->setMinimumHeight(38);
+	bf->addRow(snapBtn);
+	bf->addRow(helpLabel("타임라인의 노란 세로선이 비트 위치입니다. 자동 감지가 반 박 어긋나면 "
+			     "'첫 박 위치'를 조금씩 조절하세요."));
+	lay->addWidget(beatBox);
+	lay->addStretch();
+
+	connect(pickBtn, &QPushButton::clicked, this, &EditorWindow::chooseMusic);
+	connect(clearBtn, &QPushButton::clicked, this, &EditorWindow::clearMusic);
+	connect(m_detectBtn, &QPushButton::clicked, this, &EditorWindow::detectBeats);
+	connect(snapBtn, &QPushButton::clicked, this, &EditorWindow::snapToBeats);
+	connect(m_snap, &QCheckBox::toggled, this, [this](bool on) { m_timeline->setSnapToBeats(on); });
+	connect(m_musicOffset, &QDoubleSpinBox::valueChanged, this, &EditorWindow::onMusicPropsChanged);
+	connect(m_musicVol, &QSlider::valueChanged, this, &EditorWindow::onMusicPropsChanged);
+	connect(m_gameVol, &QSlider::valueChanged, this, &EditorWindow::onMusicPropsChanged);
+	connect(m_musicFade, &QCheckBox::toggled, this, &EditorWindow::onMusicPropsChanged);
+	connect(m_bpm, &QDoubleSpinBox::valueChanged, this, &EditorWindow::onMusicPropsChanged);
+	connect(m_firstBeat, &QDoubleSpinBox::valueChanged, this, &EditorWindow::onMusicPropsChanged);
+	connect(m_beatEvery, &QComboBox::currentIndexChanged, this, &EditorWindow::onMusicPropsChanged);
+	return w;
+}
+
+QWidget *EditorWindow::buildSubtitleTab()
+{
+	auto *w = new QWidget;
+	auto *lay = new QVBoxLayout(w);
+
+	m_subList = new QListWidget;
+	m_subList->setMaximumHeight(170);
+	lay->addWidget(m_subList);
+
+	auto *btns = new QHBoxLayout;
+	auto *addBtn = new QPushButton("＋ 현재 위치에 자막 추가 (T)");
+	auto *delBtn = new QPushButton("삭제");
+	btns->addWidget(addBtn, 1);
+	btns->addWidget(delBtn);
+	lay->addLayout(btns);
+	connect(addBtn, &QPushButton::clicked, this, &EditorWindow::addSubtitle);
+	connect(delBtn, &QPushButton::clicked, this, &EditorWindow::deleteSelectedSubtitle);
+	connect(m_subList, &QListWidget::currentRowChanged, this, [this](int row) {
+		if (!m_syncing)
+			selectSubtitle(row);
+	});
+
+	auto *box = new QGroupBox("선택한 자막");
+	m_subProps = box;
+	auto *form = new QFormLayout(box);
+
+	m_subText = new QPlainTextEdit;
+	m_subText->setMaximumHeight(72);
+	m_subText->setPlaceholderText("자막 내용 (Enter로 줄바꿈)");
+	form->addRow("내용", m_subText);
+
+	auto makeTimeRow = [this](QDoubleSpinBox *&spin) {
+		auto *row = new QHBoxLayout;
+		spin = new QDoubleSpinBox;
+		spin->setDecimals(2);
+		spin->setSingleStep(0.1);
+		spin->setSuffix(" 초");
+		spin->setRange(0, 3600);
+		auto *nowBtn = new QPushButton("현재 위치");
+		row->addWidget(spin, 1);
+		row->addWidget(nowBtn);
+		QDoubleSpinBox *target = spin;
+		connect(nowBtn, &QPushButton::clicked, this, [this, target] { target->setValue(position()); });
+		return row;
+	};
+	form->addRow("시작", makeTimeRow(m_subStart));
+	form->addRow("끝", makeTimeRow(m_subEnd));
+
+	m_subSize = new QSpinBox;
+	m_subSize->setRange(28, 200);
+	m_subSize->setSuffix(" px");
+	form->addRow("글자 크기", m_subSize);
+
+	auto *colorRow = new QHBoxLayout;
+	m_subColor = makeColorButton(&m_subColorValue, [this] { onSubtitlePropsChanged(); });
+	colorRow->addWidget(m_subColor);
+	for (const char *c : {"#FFFFFF", "#FFE14D", "#FF5A5A", "#5AD1FF", "#7CFF7A"}) {
+		auto *b = new QPushButton;
+		b->setFixedSize(26, 26);
+		paintColorButton(b, QColor(c));
+		const QColor col(c);
+		connect(b, &QPushButton::clicked, this, [this, col] {
+			m_subColorValue = col;
+			paintColorButton(m_subColor, col);
+			onSubtitlePropsChanged();
+		});
+		colorRow->addWidget(b);
+	}
+	colorRow->addStretch();
+	form->addRow("색상", colorRow);
+
+	m_subY = new QSlider(Qt::Horizontal);
+	m_subY->setRange(5, 95);
+	form->addRow("세로 위치", m_subY);
+	m_subBox = new QCheckBox("반투명 배경 박스");
+	form->addRow(m_subBox);
+
+	connect(m_subText, &QPlainTextEdit::textChanged, this, &EditorWindow::onSubtitlePropsChanged);
+	connect(m_subStart, &QDoubleSpinBox::valueChanged, this, &EditorWindow::onSubtitlePropsChanged);
+	connect(m_subEnd, &QDoubleSpinBox::valueChanged, this, &EditorWindow::onSubtitlePropsChanged);
+	connect(m_subSize, &QSpinBox::valueChanged, this, &EditorWindow::onSubtitlePropsChanged);
+	connect(m_subY, &QSlider::valueChanged, this, &EditorWindow::onSubtitlePropsChanged);
+	connect(m_subBox, &QCheckBox::toggled, this, &EditorWindow::onSubtitlePropsChanged);
+
+	lay->addWidget(box);
+	lay->addWidget(helpLabel("자막 시간은 결과 영상 기준입니다. 구간을 많이 바꾼 뒤에는 위치를 한 번 확인하세요."));
+	lay->addStretch();
+	m_subProps->setEnabled(false);
+	return w;
+}
+
+QWidget *EditorWindow::buildCardTab()
+{
+	auto *w = new QWidget;
+	auto *lay = new QVBoxLayout(w);
+
+	auto build = [this, lay](CardUi &ui, TitleCard *card, const QString &title, const QString &placeholder) {
+		auto *box = new QGroupBox(title);
+		auto *form = new QFormLayout(box);
+		ui.enabled = new QCheckBox("사용");
+		ui.duration = new QDoubleSpinBox;
+		ui.duration->setRange(0.5, 10);
+		ui.duration->setSingleStep(0.5);
+		ui.duration->setSuffix(" 초");
+		ui.title = new QLineEdit;
+		ui.title->setPlaceholderText(placeholder);
+		ui.subtitle = new QLineEdit;
+		ui.subtitle->setPlaceholderText("작은 글씨 (예: 닉네임, 시즌)");
+		ui.bg = makeColorButton(&card->background, [this] { onCardPropsChanged(); });
+		ui.color = makeColorButton(&card->color, [this] { onCardPropsChanged(); });
+		form->addRow(ui.enabled);
+		form->addRow("길이", ui.duration);
+		form->addRow("제목", ui.title);
+		form->addRow("부제", ui.subtitle);
+		form->addRow("배경색", ui.bg);
+		form->addRow("글자색", ui.color);
+		lay->addWidget(box);
+
+		connect(ui.enabled, &QCheckBox::toggled, this, &EditorWindow::onCardPropsChanged);
+		connect(ui.duration, &QDoubleSpinBox::valueChanged, this, &EditorWindow::onCardPropsChanged);
+		connect(ui.title, &QLineEdit::textChanged, this, &EditorWindow::onCardPropsChanged);
+		connect(ui.subtitle, &QLineEdit::textChanged, this, &EditorWindow::onCardPropsChanged);
+	};
+	build(m_introUi, &m_project.intro, "인트로", "예: 이터널리턴 매드무비");
+	build(m_outroUi, &m_project.outro, "아웃트로", "예: 구독과 좋아요");
+	lay->addWidget(helpLabel("인트로/아웃트로 동안에도 BGM은 계속 나옵니다. 첫 구간의 전환을 "
+				 "'화이트 플래시'로 두면 인트로에서 넘어갈 때 임팩트가 커요."));
+	lay->addStretch();
+	return w;
+}
+
+QWidget *EditorWindow::buildExportTab()
+{
+	auto *w = new QWidget;
+	auto *form = new QFormLayout(w);
+
+	m_layout = new QComboBox;
+	m_layout->addItems({"가운데 크롭", "가운데 크롭 + 미니맵", "원본 + 흐린 배경"});
+	connect(m_layout, &QComboBox::currentIndexChanged, this, [this](int i) {
+		if (m_syncing)
+			return;
+		m_project.layout = ShortsLayout(i);
+		applyLayoutToPreview();
+		projectChanged();
+	});
+	form->addRow("레이아웃", m_layout);
+
+	m_outName = new QLineEdit(QFileInfo(m_project.filePath).completeBaseName());
+	form->addRow("파일 이름", m_outName);
+
+	m_exportBtn = new QPushButton("쇼츠로 내보내기");
+	m_exportBtn->setMinimumHeight(44);
+	connect(m_exportBtn, &QPushButton::clicked, this, &EditorWindow::onExport);
+	form->addRow(m_exportBtn);
+
+	m_progress = new QProgressBar;
+	m_progress->setRange(0, 100);
+	m_progress->setValue(0);
+	form->addRow(m_progress);
+
+	auto *openBtn = new QPushButton("결과 폴더 열기");
+	connect(openBtn, &QPushButton::clicked, this, [this] {
+		QDir().mkpath(m_shortsDir);
+		QDesktopServices::openUrl(QUrl::fromLocalFile(m_shortsDir));
+	});
+	form->addRow(openBtn);
+
+	m_log = new QPlainTextEdit;
+	m_log->setReadOnly(true);
+	m_log->setMinimumHeight(160);
+	form->addRow(m_log);
+	return w;
+}
+
+void EditorWindow::setupShortcuts()
+{
+	auto add = [this](const QKeySequence &k, auto fn) {
+		auto *s = new QShortcut(k, this);
+		connect(s, &QShortcut::activated, this, fn);
+	};
+	add(QKeySequence(Qt::Key_Space), [this] { togglePlay(); });
+	add(QKeySequence(Qt::Key_S), [this] { splitAtPlayhead(); });
+	add(QKeySequence(Qt::Key_B), [this] { splitSelectedOnBeats(); });
+	add(QKeySequence(Qt::Key_Delete), [this] { deleteSelectedSegment(); });
+	add(QKeySequence(Qt::CTRL | Qt::Key_D), [this] { duplicateSelectedSegment(); });
+	add(QKeySequence(Qt::Key_T), [this] { addSubtitle(); });
+	add(QKeySequence(Qt::Key_Left), [this] { seek(position() - 1.0); });
+	add(QKeySequence(Qt::Key_Right), [this] { seek(position() + 1.0); });
+	add(QKeySequence(Qt::Key_Comma), [this] { seek(position() - 0.1); });
+	add(QKeySequence(Qt::Key_Period), [this] { seek(position() + 0.1); });
+	add(QKeySequence(Qt::Key_Home), [this] { seek(0); });
+}
+
+QPushButton *EditorWindow::makeColorButton(QColor *target, std::function<void()> onChange)
+{
+	auto *b = new QPushButton;
+	b->setFixedSize(60, 26);
+	paintColorButton(b, *target);
+	connect(b, &QPushButton::clicked, this, [this, b, target, onChange] {
+		const QColor c = QColorDialog::getColor(*target, this, "색상 선택");
+		if (!c.isValid())
+			return;
+		*target = c;
+		paintColorButton(b, c);
+		onChange();
+	});
+	return b;
+}
+
+void EditorWindow::paintColorButton(QPushButton *b, const QColor &c)
+{
+	b->setStyleSheet(QString("background:%1; border:1px solid #555; border-radius:4px;").arg(c.name()));
+}
+
+void EditorWindow::loadUiFromProject()
+{
+	m_syncing = true;
+	const MusicTrack &m = m_project.music;
+	m_musicFile->setText(m.path.isEmpty() ? "없음" : QFileInfo(m.path).fileName());
+	m_musicOffset->setValue(m.fileOffset);
+	m_musicVol->setValue(int(std::lround(m.volume * 100)));
+	m_gameVol->setValue(int(std::lround(m_project.gameVolume * 100)));
+	m_musicFade->setChecked(m.fadeOut);
+	m_bpm->setValue(m.bpm);
+	m_firstBeat->setValue(m.firstBeat);
+	m_beatEvery->setCurrentIndex(std::max(0, m_beatEvery->findData(m.beatEvery)));
+
+	auto loadCard = [](CardUi &ui, const TitleCard &c) {
+		ui.enabled->setChecked(c.enabled);
+		ui.duration->setValue(c.duration);
+		ui.title->setText(c.title);
+		ui.subtitle->setText(c.subtitle);
+		paintColorButton(ui.bg, c.background);
+		paintColorButton(ui.color, c.color);
+	};
+	loadCard(m_introUi, m_project.intro);
+	loadCard(m_outroUi, m_project.outro);
+
+	m_layout->setCurrentIndex(int(m_project.layout));
+	m_syncing = false;
+
+	refreshClipList();
+	refreshSubtitleList();
+	applyLayoutToPreview();
+	rebuildSubtitleVisuals();
+	selectSegment(-1);
+	seek(0);
+}
+
+// ═════════════════════════════════════════════════════════════
+// 클립 / 플레이어
+// ═════════════════════════════════════════════════════════════
+void EditorWindow::createPlayerFor(int i)
+{
+	SourcePlayer sp;
+	sp.player = new QMediaPlayer(this);
+	sp.audio = new QAudioOutput(this);
+	sp.player->setAudioOutput(sp.audio);
+	sp.item = new QGraphicsVideoItem(m_canvas);
+	sp.item->setAspectRatioMode(Qt::IgnoreAspectRatio);
+	sp.item->setVisible(false);
+	sp.player->setVideoOutput(sp.item);
+	m_players.push_back(sp);
+
+	connect(sp.player, &QMediaPlayer::durationChanged, this, [this, i] { onSourceInfo(i); });
+	connect(sp.player, &QMediaPlayer::hasAudioChanged, this, [this, i] { onSourceInfo(i); });
+	connect(sp.player, &QMediaPlayer::mediaStatusChanged, this, [this, i](QMediaPlayer::MediaStatus s) {
+		if (s == QMediaPlayer::LoadedMedia)
+			onSourceInfo(i);
+		else if (s == QMediaPlayer::InvalidMedia)
+			log("클립을 열 수 없습니다: " + m_project.sources.value(i).path);
+	});
+	connect(sp.item, &QGraphicsVideoItem::nativeSizeChanged, this, [this, i] { onSourceInfo(i); });
+
+	sp.player->setSource(QUrl::fromLocalFile(m_project.sources[i].path));
+	sp.player->pause(); // 첫 프레임 디코딩
+}
+
+void EditorWindow::onSourceInfo(int i)
+{
+	if (i < 0 || i >= m_players.size())
+		return;
+	const SourcePlayer &sp = m_players[i];
+	const double dur = sp.player->duration() / 1000.0;
+	const QSize size = sp.item->nativeSize().toSize();
+	m_project.setSourceInfo(i, dur, size, sp.player->hasAudio());
+	refreshClipList();
+	applyLayoutToPreview();
+	projectChanged();
+	syncPlayers(position(), m_playing);
+}
+
+void EditorWindow::addClips()
+{
+	const QStringList files = QFileDialog::getOpenFileNames(this, "클립 추가", m_clipsDir,
+								"영상 (*.mp4 *.mkv *.mov)");
+	for (const QString &f : files) {
+		const int idx = m_project.addSource(f);
+		createPlayerFor(idx);
+	}
+	if (!files.isEmpty()) {
+		refreshClipList();
+		projectChanged();
+	}
+}
+
+void EditorWindow::refreshClipList()
+{
+	const int keep = m_clipList->currentRow();
+	m_clipList->clear();
+	for (int i = 0; i < m_project.sources.size(); ++i) {
+		const SourceClip &c = m_project.sources[i];
+		int uses = 0;
+		for (const Segment &s : m_project.segments)
+			uses += (s.source == i);
+		auto *item = new QListWidgetItem(QString("#%1  %2   (%3초 · 타임라인 %4개)")
+							 .arg(i + 1)
+							 .arg(c.name())
+							 .arg(c.duration, 0, 'f', 1)
+							 .arg(uses));
+		item->setForeground(kClipColors[i % 8].lighter(130));
+		m_clipList->addItem(item);
+	}
+	if (keep >= 0 && keep < m_clipList->count())
+		m_clipList->setCurrentRow(keep);
+}
+
+// ═════════════════════════════════════════════════════════════
+// 재생: 결과 시간 시계를 기준으로 클립 플레이어와 BGM을 맞춰 줌
+// ═════════════════════════════════════════════════════════════
+double EditorWindow::position() const
+{
+	return m_playing ? m_playStart + m_clock.elapsed() / 1000.0 : m_pos;
+}
+
+void EditorWindow::play()
+{
+	const double total = m_project.totalDuration();
+	if (total <= 0)
+		return;
+	if (m_pos >= total - 0.05)
+		m_pos = 0;
+	m_playStart = m_pos;
+	m_clock.start();
+	m_playing = true;
+	m_activeSeg = -1;
+	m_playBtn->setText("⏸ 일시정지");
+	syncPlayers(m_pos, true);
+}
+
+void EditorWindow::pause()
+{
+	m_pos = position();
+	m_playing = false;
+	for (const SourcePlayer &sp : m_players)
+		sp.player->pause();
+	m_bgm->pause();
+	m_playBtn->setText("▶ 재생");
+	syncPlayers(m_pos, false);
+}
+
+void EditorWindow::togglePlay() { m_playing ? pause() : play(); }
+
+void EditorWindow::seek(double t)
+{
+	t = std::clamp(t, 0.0, std::max(0.0, m_project.totalDuration() - 0.01));
+	m_pos = t;
+	if (m_playing) {
+		m_playStart = t;
+		m_clock.restart();
+		m_activeSeg = -1;
+	}
+	syncPlayers(t, m_playing);
+	m_timeline->setPosition(t);
+	updateOverlays(t);
+	updateTimeLabel(t);
+}
+
+void EditorWindow::tick()
+{
+	double t = position();
+	const double total = m_project.totalDuration();
+	if (m_playing && t >= total) {
+		m_pos = std::max(0.0, total - 0.01);
+		pause();
+		t = m_pos;
+	}
+	if (m_playing)
+		syncPlayers(t, true);
+	m_timeline->setPosition(t);
+	updateOverlays(t);
+	updateTimeLabel(t);
+}
+
+void EditorWindow::syncPlayers(double t, bool playing)
+{
+	const auto loc = m_project.locate(t);
+
+	// ── 영상 ──
+	int wantSource = -1;
+	if (loc.kind == EditProject::Locate::Segment)
+		wantSource = m_project.segments[loc.seg].source;
+
+	if (wantSource != m_activeSource) {
+		if (m_activeSource >= 0 && m_activeSource < m_players.size()) {
+			m_players[m_activeSource].player->pause();
+			m_players[m_activeSource].item->setVisible(false);
+		}
+		m_activeSource = wantSource;
+		m_activeSeg = -1;
+	}
+
+	if (wantSource >= 0 && wantSource < m_players.size()) {
+		const Segment &seg = m_project.segments[loc.seg];
+		SourcePlayer &sp = m_players[wantSource];
+		sp.item->setVisible(true);
+		sp.audio->setVolume(float(std::min(1.0, m_project.gameVolume)));
+		const qint64 expected = qint64(loc.srcTime * 1000.0);
+		const qint64 drift = std::llabs(sp.player->position() - expected);
+
+		if (playing) {
+			if (std::abs(sp.player->playbackRate() - seg.speed) > 0.01)
+				sp.player->setPlaybackRate(seg.speed);
+			if (sp.player->playbackState() != QMediaPlayer::PlayingState) {
+				sp.player->setPosition(expected);
+				sp.player->play();
+			} else {
+				// 같은 클립에서 바로 이어지는 컷이면 다시 탐색하지 않음 (끊김 방지)
+				bool contiguous = false;
+				if (m_activeSeg >= 0 && m_activeSeg == loc.seg - 1) {
+					const Segment &prev = m_project.segments[m_activeSeg];
+					contiguous = prev.source == seg.source && std::abs(prev.out - seg.in) < 0.02;
+				}
+				if ((m_activeSeg != loc.seg && !contiguous) || drift > 150)
+					sp.player->setPosition(expected);
+			}
+		} else {
+			if (sp.player->playbackState() == QMediaPlayer::PlayingState)
+				sp.player->pause();
+			if (drift > 15)
+				sp.player->setPosition(expected);
+		}
+		m_activeSeg = loc.seg;
+	} else {
+		m_activeSeg = -1;
+	}
+
+	// ── BGM ──
+	if (!m_project.music.path.isEmpty() && m_bgm->duration() > 0) {
+		const double total = m_project.totalDuration();
+		double vol = std::min(1.0, m_project.music.volume);
+		if (m_project.music.fadeOut && total > 3.0 && t > total - 1.5)
+			vol *= std::clamp((total - t) / 1.5, 0.0, 1.0);
+		m_bgmAudio->setVolume(float(vol));
+
+		const qint64 expected = qint64((m_project.music.fileOffset + t) * 1000.0);
+		const bool inRange = expected < m_bgm->duration();
+		const qint64 drift = std::llabs(m_bgm->position() - expected);
+		if (playing && inRange) {
+			if (m_bgm->playbackState() != QMediaPlayer::PlayingState) {
+				m_bgm->setPosition(expected);
+				m_bgm->play();
+			} else if (drift > 120) {
+				m_bgm->setPosition(expected);
+			}
+		} else {
+			if (m_bgm->playbackState() == QMediaPlayer::PlayingState)
+				m_bgm->pause();
+			if (inRange && drift > 50)
+				m_bgm->setPosition(expected);
+		}
+	}
+}
+
+void EditorWindow::updateTimeLabel(double t)
+{
+	QString beatInfo;
+	if (m_project.beatInterval() > 0) {
+		const double b = m_project.nearestBeat(t);
+		if (b >= 0)
+			beatInfo = QString("   ·   가장 가까운 비트 %1").arg(fmt(b));
+	}
+	m_timeLabel->setText(QString("%1 / %2%3").arg(fmt(t), fmt(m_project.totalDuration()), beatInfo));
+}
+
+// ═════════════════════════════════════════════════════════════
+// 미리보기 캔버스
+// ═════════════════════════════════════════════════════════════
+void EditorWindow::applyLayoutToPreview()
+{
+	const bool blur = (m_project.layout == ShortsLayout::BlurBackground);
+	m_canvas->setBrush(blur ? QColor("#22222A") : QColor("#111114"));
+
+	for (int i = 0; i < m_players.size() && i < m_project.sources.size(); ++i) {
+		const QSize s = m_project.sources[i].size;
+		const double sw = std::max(1, s.width());
+		const double sh = std::max(1, s.height());
+		QGraphicsVideoItem *item = m_players[i].item;
+		QPointF pos;
+		if (blur) {
+			const double h = kCanvasW * sh / sw;
+			item->setSize(QSizeF(kCanvasW, h));
+			pos = QPointF(0, (kCanvasH - h) / 2);
+		} else {
+			const double w = kCanvasH * sw / sh;
+			item->setSize(QSizeF(w, kCanvasH));
+			pos = QPointF((kCanvasW - w) / 2, 0);
+		}
+		item->setPos(pos);
+		item->setData(0, pos); // 글리치 흔들림 기준 위치
+		item->setTransformOriginPoint(item->size().width() / 2, item->size().height() / 2);
+	}
+
+	const bool mm = (m_project.layout == ShortsLayout::CropWithMinimap);
+	m_minimapHint->setVisible(mm);
+	if (mm) {
+		const QSize s = m_project.sources.isEmpty() ? QSize(1920, 1080) : m_project.sources.first().size;
+		const QRectF r = m_project.minimapRect;
+		const double mw = 380.0;
+		const double mh = mw * (r.height() * s.height()) / (r.width() * std::max(1, s.width()));
+		m_minimapHint->setRect(kCanvasW - 28 - mw, 150, mw, mh);
+	}
+}
+
+void EditorWindow::rebuildSubtitleVisuals()
+{
+	for (SubVisual &v : m_subVisuals) {
+		delete v.text;
+		delete v.box;
+	}
+	m_subVisuals.clear();
+
+	for (const Subtitle &s : m_project.subtitles) {
+		SubVisual v;
+		v.box = new QGraphicsRectItem(m_canvas);
+		v.box->setBrush(QColor(0, 0, 0, 102));
+		v.box->setPen(Qt::NoPen);
+		v.box->setZValue(10);
+
+		v.text = new QGraphicsSimpleTextItem(s.text.trimmed(), m_canvas);
+		QFont f("Malgun Gothic");
+		f.setBold(true);
+		f.setPixelSize(s.fontSize);
+		v.text->setFont(f);
+		v.text->setBrush(s.color);
+		v.text->setPen(QPen(Qt::black, 3));
+		v.text->setZValue(11);
+
+		const QRectF br = v.text->boundingRect();
+		const QPointF pos((kCanvasW - br.width()) / 2, kCanvasH * s.y - br.height() / 2);
+		v.text->setPos(pos);
+		v.box->setRect(QRectF(pos, br.size()).adjusted(-22, -22, 22, 22));
+		v.box->setVisible(false);
+		v.text->setVisible(false);
+		m_subVisuals.push_back(v);
+	}
+	updateOverlays(position());
+}
+
+void EditorWindow::rebuildCardVisual()
+{
+	// 현재 위치가 인트로인지 아웃트로인지에 따라 내용 채움 (updateOverlays에서 호출)
+	const auto loc = m_project.locate(position());
+	const TitleCard &c = (loc.kind == EditProject::Locate::Outro) ? m_project.outro : m_project.intro;
+
+	m_cardItem->setBrush(c.background);
+	QFont tf("Malgun Gothic");
+	tf.setBold(true);
+	tf.setPixelSize(110);
+	m_cardTitle->setFont(tf);
+	m_cardTitle->setText(c.title.trimmed());
+	m_cardTitle->setBrush(c.color);
+	QFont sf("Malgun Gothic");
+	sf.setBold(true);
+	sf.setPixelSize(54);
+	m_cardSub->setFont(sf);
+	m_cardSub->setText(c.subtitle.trimmed());
+	QColor sc = c.color;
+	sc.setAlphaF(0.85);
+	m_cardSub->setBrush(sc);
+
+	const bool hasSub = !c.subtitle.trimmed().isEmpty();
+	const QRectF tb = m_cardTitle->boundingRect();
+	m_cardTitle->setPos((kCanvasW - tb.width()) / 2,
+			    hasSub ? kCanvasH / 2 - tb.height() - 20 : (kCanvasH - tb.height()) / 2);
+	const QRectF sb = m_cardSub->boundingRect();
+	m_cardSub->setPos((kCanvasW - sb.width()) / 2, kCanvasH / 2 + 30);
+}
+
+void EditorWindow::updateOverlays(double t)
+{
+	const auto loc = m_project.locate(t);
+
+	// 자막
+	for (int i = 0; i < m_subVisuals.size() && i < m_project.subtitles.size(); ++i) {
+		const Subtitle &s = m_project.subtitles[i];
+		const bool on = t >= s.start && t < s.end && !s.text.trimmed().isEmpty();
+		m_subVisuals[i].text->setVisible(on);
+		m_subVisuals[i].box->setVisible(on && s.box);
+	}
+
+	// 인트로/아웃트로 카드
+	const bool card = (loc.kind == EditProject::Locate::Intro || loc.kind == EditProject::Locate::Outro);
+	m_cardItem->setVisible(card);
+	if (card) {
+		rebuildCardVisual();
+		const double d = (loc.kind == EditProject::Locate::Intro) ? m_project.introDuration()
+									    : m_project.outroDuration();
+		const double fd = std::min(0.3, d / 3);
+		m_cardTitle->setOpacity(std::clamp(std::min(loc.local / fd, (d - loc.local) / fd), 0.0, 1.0));
+		m_cardSub->setOpacity(m_cardTitle->opacity());
+	}
+
+	// 구간 효과 / 전환
+	m_flashOverlay->setVisible(false);
+	m_effectBadge->setVisible(false);
+	if (loc.kind != EditProject::Locate::Segment)
+		return;
+
+	const Segment &seg = m_project.segments[loc.seg];
+	const double local = loc.local;
+	const double dur = seg.outDuration();
+	double scale = seg.zoom ? 1.3 : 1.0;
+	QPointF jitter;
+
+	switch (seg.transIn) {
+	case Transition::Flash:
+		if (local < 0.25) {
+			m_flashOverlay->setBrush(Qt::white);
+			m_flashOverlay->setOpacity(1.0 - local / 0.25);
+			m_flashOverlay->setVisible(true);
+		}
+		break;
+	case Transition::BlackDip:
+		if (local < 0.15) {
+			m_flashOverlay->setBrush(Qt::black);
+			m_flashOverlay->setOpacity(1.0 - local / 0.15);
+			m_flashOverlay->setVisible(true);
+		}
+		break;
+	case Transition::ZoomPunch:
+		scale *= std::max(1.0, 1.35 - 0.35 * local / 0.3);
+		break;
+	case Transition::Glitch:
+		if (local < 0.2)
+			jitter = QPointF(QRandomGenerator::global()->bounded(-24, 25),
+					 QRandomGenerator::global()->bounded(-12, 13));
+		break;
+	case Transition::None:
+		break;
+	}
+	if (loc.seg + 1 < m_project.segments.size() &&
+	    m_project.segments[loc.seg + 1].transIn == Transition::BlackDip && dur - local < 0.15) {
+		m_flashOverlay->setBrush(Qt::black);
+		m_flashOverlay->setOpacity(1.0 - (dur - local) / 0.15);
+		m_flashOverlay->setVisible(true);
+	}
+
+	if (seg.source >= 0 && seg.source < m_players.size()) {
+		QGraphicsVideoItem *item = m_players[seg.source].item;
+		item->setScale(scale);
+		if (item->data(0).isValid())
+			item->setPos(item->data(0).toPointF() + jitter);
+	}
+
+	QStringList info;
+	if (std::abs(seg.speed - 1.0) > 0.01)
+		info << QString("%1x").arg(seg.speed);
+	for (const QString &n : seg.effectNames())
+		if (n != "줌인")
+			info << n;
+	if (!info.isEmpty()) {
+		m_effectBadge->setText(info.join(" · "));
+		m_effectBadge->setVisible(true);
+	}
+}
+
+// ═════════════════════════════════════════════════════════════
+// 구간
+// ═════════════════════════════════════════════════════════════
+void EditorWindow::splitAtPlayhead()
+{
+	const double t = position();
+	if (!m_project.splitAt(t)) {
+		log("여기서는 자를 수 없습니다 (구간 끝에 너무 가깝거나 인트로/아웃트로)");
+		return;
+	}
+	selectSegment(m_project.locate(t).seg);
+	projectChanged();
+}
+
+void EditorWindow::splitSelectedOnBeats()
+{
+	const int i = m_timeline->selectedSegment();
+	if (i < 0 || i >= m_project.segments.size()) {
+		log("비트마다 자를 구간을 먼저 선택하세요");
+		return;
+	}
+	if (m_project.beatInterval() <= 0) {
+		log("음악 탭에서 BGM과 BPM을 먼저 설정하세요");
+		return;
+	}
+	const double start = m_project.segmentStart(i);
+	const double end = start + m_project.segments[i].outDuration();
+	int n = 0;
+	for (double b : m_project.beatTimes()) {
+		if (b <= start + 0.15)
+			continue;
+		if (b >= end - 0.15)
+			break;
+		n += m_project.splitAt(b) ? 1 : 0;
+	}
+	log(QString("비트 위치에서 %1번 잘랐습니다").arg(n));
+	selectSegment(i);
+	projectChanged();
+}
+
+void EditorWindow::deleteSelectedSegment()
+{
+	const int i = m_timeline->selectedSegment();
+	if (i < 0 || i >= m_project.segments.size()) {
+		log("삭제할 구간을 타임라인에서 먼저 선택하세요");
+		return;
+	}
+	m_project.segments.removeAt(i);
+	selectSegment(std::min(i, int(m_project.segments.size()) - 1));
+	projectChanged();
+	seek(position());
+}
+
+void EditorWindow::duplicateSelectedSegment()
+{
+	const int i = m_timeline->selectedSegment();
+	if (i < 0 || i >= m_project.segments.size())
+		return;
+	Segment copy = m_project.segments[i];
+	copy.transIn = Transition::Flash;
+	m_project.segments.insert(i + 1, copy);
+	selectSegment(i + 1);
+	projectChanged();
+}
+
+void EditorWindow::moveSelected(int delta)
+{
+	const int i = m_timeline->selectedSegment();
+	const int j = i + delta;
+	if (i < 0 || j < 0 || j >= m_project.segments.size())
+		return;
+	m_project.moveSegment(i, j);
+	selectSegment(j);
+	projectChanged();
+	seek(m_project.segmentStart(j));
+}
+
+void EditorWindow::selectSegment(int i)
+{
+	if (i >= m_project.segments.size())
+		i = -1;
+	m_timeline->setSelectedSegment(i);
+	m_segProps->setEnabled(i >= 0);
+	if (i < 0) {
+		m_segInfo->setText("타임라인에서 구간을 클릭하세요");
+		return;
+	}
+
+	const Segment &s = m_project.segments[i];
+	m_syncing = true;
+	m_segInfo->setText(QString("#%1 %2\n원본 %3 ~ %4 → 결과 %5초")
+				   .arg(s.source + 1)
+				   .arg(m_project.sources.value(s.source).name())
+				   .arg(fmt(s.in), fmt(s.out))
+				   .arg(s.outDuration(), 0, 'f', 2));
+	int speedIdx = 3;
+	for (int k = 0; k < kSpeeds.size(); ++k)
+		if (std::abs(kSpeeds[k].second - s.speed) < 0.01)
+			speedIdx = k;
+	m_segSpeed->setCurrentIndex(speedIdx);
+	m_segTrans->setCurrentIndex(int(s.transIn));
+	m_fxZoom->setChecked(s.zoom);
+	m_fxShake->setChecked(s.shake);
+	m_fxGray->setChecked(s.gray);
+	m_fxVivid->setChecked(s.vivid);
+	m_fxVignette->setChecked(s.vignette);
+	m_syncing = false;
+}
+
+void EditorWindow::onSegmentPropsChanged()
+{
+	const int i = m_timeline->selectedSegment();
+	if (m_syncing || i < 0 || i >= m_project.segments.size())
+		return;
+	Segment &s = m_project.segments[i];
+	s.speed = m_segSpeed->currentData().toDouble();
+	s.transIn = Transition(m_segTrans->currentData().toInt());
+	s.zoom = m_fxZoom->isChecked();
+	s.shake = m_fxShake->isChecked();
+	s.gray = m_fxGray->isChecked();
+	s.vivid = m_fxVivid->isChecked();
+	s.vignette = m_fxVignette->isChecked();
+	selectSegment(i);
+	projectChanged();
+	seek(position());
+}
+
+// ═════════════════════════════════════════════════════════════
+// 음악
+// ═════════════════════════════════════════════════════════════
+void EditorWindow::chooseMusic()
+{
+	const QString f = QFileDialog::getOpenFileName(this, "배경음악 선택", QString(),
+						       "오디오 (*.mp3 *.wav *.m4a *.aac *.ogg *.flac)");
+	if (f.isEmpty())
+		return;
+	m_project.music.path = f;
+	m_project.music.bpm = 0;
+	m_project.music.firstBeat = 0;
+	m_bgm->setSource(QUrl::fromLocalFile(f));
+	loadUiFromProject();
+	projectChanged();
+	detectBeats();
+}
+
+void EditorWindow::clearMusic()
+{
+	m_project.music = MusicTrack{};
+	m_bgm->stop();
+	m_bgm->setSource(QUrl());
+	m_beatStatus->clear();
+	loadUiFromProject();
+	projectChanged();
+}
+
+void EditorWindow::onMusicPropsChanged()
+{
+	if (m_syncing)
+		return;
+	MusicTrack &m = m_project.music;
+	m.fileOffset = m_musicOffset->value();
+	m.volume = m_musicVol->value() / 100.0;
+	m_project.gameVolume = m_gameVol->value() / 100.0;
+	m.fadeOut = m_musicFade->isChecked();
+	m.bpm = m_bpm->value();
+	m.firstBeat = m_firstBeat->value();
+	m.beatEvery = m_beatEvery->currentData().toInt();
+	projectChanged();
+	syncPlayers(position(), m_playing);
+}
+
+void EditorWindow::detectBeats()
+{
+	if (m_project.music.path.isEmpty()) {
+		log("먼저 음악 파일을 선택하세요");
+		return;
+	}
+	m_detectBtn->setEnabled(false);
+	m_beatStatus->setText("분석 중...");
+	m_beats->start(m_project.music.path);
+}
+
+void EditorWindow::snapToBeats()
+{
+	if (m_project.beatInterval() <= 0) {
+		log("BPM이 설정되지 않았습니다 (음악 탭에서 자동 감지 또는 직접 입력)");
+		return;
+	}
+	const int n = m_project.snapCutsToBeats();
+	log(QString("컷 %1개를 비트에 맞췄습니다").arg(n));
+	selectSegment(m_timeline->selectedSegment());
+	projectChanged();
+	seek(position());
+}
+
+// ═════════════════════════════════════════════════════════════
+// 자막
+// ═════════════════════════════════════════════════════════════
+void EditorWindow::addSubtitle()
+{
+	const double total = m_project.totalDuration();
+	if (total <= 0)
+		return;
+	const double t = position();
+	Subtitle s;
+	if (!m_project.subtitles.isEmpty()) {
+		const Subtitle &prev = m_project.subtitles.last();
+		s.fontSize = prev.fontSize;
+		s.color = prev.color;
+		s.y = prev.y;
+		s.box = prev.box;
+	}
+	s.start = t;
+	s.end = std::min(t + 2.0, total);
+	if (s.end - s.start < 0.3)
+		s.start = std::max(0.0, s.end - 2.0);
+	s.text = "자막 입력";
+	m_project.subtitles.push_back(s);
+
+	refreshSubtitleList();
+	rebuildSubtitleVisuals();
+	selectSubtitle(int(m_project.subtitles.size()) - 1);
+	m_tabs->setCurrentIndex(3);
+	m_subText->setFocus();
+	m_subText->selectAll();
+	projectChanged();
+}
+
+void EditorWindow::deleteSelectedSubtitle()
+{
+	const int i = m_subList->currentRow();
+	if (i < 0 || i >= m_project.subtitles.size())
+		return;
+	m_project.subtitles.removeAt(i);
+	refreshSubtitleList();
+	rebuildSubtitleVisuals();
+	selectSubtitle(std::min(i, int(m_project.subtitles.size()) - 1));
+	projectChanged();
+}
+
+void EditorWindow::selectSubtitle(int i)
+{
+	if (i >= m_project.subtitles.size())
+		i = -1;
+	m_timeline->setSelectedSubtitle(i);
+	m_subProps->setEnabled(i >= 0);
+
+	m_syncing = true;
+	m_subList->setCurrentRow(i);
+	if (i >= 0) {
+		const Subtitle &s = m_project.subtitles[i];
+		m_subText->setPlainText(s.text);
+		m_subStart->setValue(s.start);
+		m_subEnd->setValue(s.end);
+		m_subSize->setValue(s.fontSize);
+		m_subColorValue = s.color;
+		paintColorButton(m_subColor, s.color);
+		m_subY->setValue(int(std::lround(s.y * 100)));
+		m_subBox->setChecked(s.box);
+		if (!m_playing && (position() < s.start || position() >= s.end))
+			seek(s.start);
+	}
+	m_syncing = false;
+}
+
+void EditorWindow::onSubtitlePropsChanged()
+{
+	const int i = m_subList->currentRow();
+	if (m_syncing || i < 0 || i >= m_project.subtitles.size())
+		return;
+	Subtitle &s = m_project.subtitles[i];
+	s.text = m_subText->toPlainText();
+	s.start = m_subStart->value();
+	s.end = std::max(m_subEnd->value(), s.start + 0.1);
+	s.fontSize = m_subSize->value();
+	s.color = m_subColorValue;
+	s.y = m_subY->value() / 100.0;
+	s.box = m_subBox->isChecked();
+
+	m_syncing = true;
+	if (QListWidgetItem *it = m_subList->item(i))
+		it->setText(QString("%1 – %2   %3").arg(fmt(s.start), fmt(s.end), s.text.simplified()));
+	m_syncing = false;
+
+	rebuildSubtitleVisuals();
+	projectChanged();
+}
+
+void EditorWindow::refreshSubtitleList()
+{
+	m_syncing = true;
+	const int keep = m_subList->currentRow();
+	m_subList->clear();
+	for (const Subtitle &s : m_project.subtitles)
+		m_subList->addItem(QString("%1 – %2   %3").arg(fmt(s.start), fmt(s.end), s.text.simplified()));
+	if (keep >= 0 && keep < m_subList->count())
+		m_subList->setCurrentRow(keep);
+	m_syncing = false;
+}
+
+// ═════════════════════════════════════════════════════════════
+// 인트로 / 아웃트로
+// ═════════════════════════════════════════════════════════════
+void EditorWindow::onCardPropsChanged()
+{
+	if (m_syncing)
+		return;
+	auto read = [](const CardUi &ui, TitleCard &c) {
+		c.enabled = ui.enabled->isChecked();
+		c.duration = ui.duration->value();
+		c.title = ui.title->text();
+		c.subtitle = ui.subtitle->text();
+	};
+	read(m_introUi, m_project.intro);
+	read(m_outroUi, m_project.outro);
+	projectChanged();
+	seek(position());
+}
+
+// ═════════════════════════════════════════════════════════════
+// 내보내기 / 기타
+// ═════════════════════════════════════════════════════════════
+void EditorWindow::onExport()
+{
+	if (m_exporter->isRunning()) {
+		m_exporter->cancel();
+		return;
+	}
+	QDir().mkpath(m_shortsDir);
+	QString base = m_outName->text().trimmed();
+	base.replace(QRegularExpression(R"([\\/:*?"<>|])"), "_");
+	if (base.isEmpty())
+		base = "madmovie";
+	QString out = m_shortsDir + "/" + base + ".mp4";
+	for (int n = 2; QFileInfo::exists(out); ++n)
+		out = m_shortsDir + QString("/%1_%2.mp4").arg(base).arg(n);
+
+	if (m_playing)
+		pause();
+	m_project.save();
+	m_exportBtn->setText("취소");
+	m_tabs->setCurrentIndex(5);
+	m_exporter->start(m_project, out);
+}
+
+void EditorWindow::projectChanged()
+{
+	m_timeline->update();
+	refreshClipList();
+	updateTimeLabel(position());
+	m_saveTimer->start();
+}
+
+void EditorWindow::log(const QString &msg)
+{
+	m_log->appendPlainText(msg);
+	statusBar()->showMessage(msg.section('\n', 0, 0), 5000);
+}
+
+void EditorWindow::closeEvent(QCloseEvent *e)
+{
+	if (m_exporter->isRunning()) {
+		if (QMessageBox::question(this, "내보내기 중", "내보내기를 취소하고 닫을까요?") != QMessageBox::Yes) {
+			e->ignore();
+			return;
+		}
+		m_exporter->cancel();
+	}
+	m_tickTimer->stop();
+	for (const SourcePlayer &sp : m_players)
+		sp.player->stop();
+	m_bgm->stop();
+	m_project.save();
+	e->accept();
+}

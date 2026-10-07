@@ -1,0 +1,171 @@
+# ERShorts Windows 실행 파일 자동 빌드
+#
+# GitHub에 이 프로젝트를 올리면 GitHub의 Windows 서버에서
+#   1) OBS Studio(libobs + 캡처/인코더 플러그인)를 소스에서 빌드하고  ← 첫 빌드만 약 30~40분, 이후엔 캐시
+#   2) Qt 6를 설치해서 ERShorts를 빌드한 뒤
+#   3) 실행에 필요한 파일(OBS 런타임, Qt DLL, ffmpeg.exe, VC++ 런타임)을 모아
+#   4) ERShorts-windows-x64.zip 으로 묶어 줍니다.
+# 결과물: Actions 탭 → 실행 기록 → 아래쪽 "Artifacts" 에서 다운로드
+#        (v로 시작하는 태그를 push 하면 Releases 에도 자동 업로드)
+
+name: Windows 빌드
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  OBS_VERSION: '32.2.2'
+  QT_VERSION: '6.8.3'
+
+jobs:
+  build:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 150
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: 소스 가져오기
+        uses: actions/checkout@v4
+        with:
+          path: app
+
+      # ── 1. OBS Studio (캐시가 있으면 건너뜀) ─────────────────────────
+      - name: OBS 빌드 캐시 확인
+        id: obs-cache
+        uses: actions/cache@v4
+        with:
+          path: obs-dist
+          key: obs-${{ env.OBS_VERSION }}-windows-x64-v1
+
+      - name: OBS Studio 소스 받기
+        if: steps.obs-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch $env:OBS_VERSION --recursive --shallow-submodules `
+            https://github.com/obsproject/obs-studio.git obs-studio
+
+      - name: OBS Studio 빌드 (libobs + 플러그인)
+        if: steps.obs-cache.outputs.cache-hit != 'true'
+        working-directory: obs-studio
+        run: |
+          # 필요 없는 무거운 기능은 끔 (브라우저 소스, 스크립팅, AJA, VST)
+          cmake --preset windows-x64 `
+            -DENABLE_BROWSER=OFF -DENABLE_SCRIPTING=OFF -DENABLE_AJA=OFF -DENABLE_VST=OFF `
+            -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF
+          cmake --build --preset windows-x64 --parallel -- /consoleLoggerParameters:Summary /noLogo
+
+      - name: OBS 설치 폴더 만들기 (런타임 + 개발용 헤더/라이브러리)
+        if: steps.obs-cache.outputs.cache-hit != 'true'
+        working-directory: obs-studio
+        run: |
+          $prefix = "${{ github.workspace }}/obs-dist/install"
+          cmake --install build_x64 --config RelWithDebInfo --prefix $prefix
+          cmake --install build_x64 --config RelWithDebInfo --component Development --prefix $prefix
+          # libobs 헤더가 쓰는 SIMDe 등 의존성 (obs-deps)
+          $deps = Get-ChildItem .deps -Directory | Where-Object Name -match '^obs-deps-\d' | Select-Object -First 1
+          if (-not $deps) { throw "obs-deps 폴더를 찾지 못했습니다" }
+          Copy-Item $deps.FullName "${{ github.workspace }}/obs-dist/deps" -Recurse
+          Get-ChildItem "$prefix/cmake" | Format-Table Name
+
+      # ── 2. Qt + ERShorts 빌드 ────────────────────────────────────────
+      - name: Qt 설치
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: win64_msvc2022_64
+          modules: qtmultimedia
+          cache: true
+
+      - name: ERShorts 빌드
+        run: |
+          $obs  = "${{ github.workspace }}/obs-dist/install"
+          $deps = "${{ github.workspace }}/obs-dist/deps"
+          cmake -S app -B build -A x64 `
+            -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR;$obs;$deps" `
+            -Dlibobs_DIR="$obs/cmake/libobs" `
+            -Dw32-pthreads_DIR="$obs/cmake/w32-pthreads"
+          cmake --build build --config Release --parallel
+
+      # ── 3. 실행 폴더 구성 ────────────────────────────────────────────
+      - name: 실행 파일 패키징
+        run: |
+          $obs  = "${{ github.workspace }}/obs-dist/install"
+          $dist = "${{ github.workspace }}/ERShorts"
+          $bin  = "$dist/bin/64bit"
+          New-Item -ItemType Directory -Force $bin | Out-Null
+
+          # (1) OBS 런타임: libobs, 그래픽 모듈, FFmpeg DLL, 데이터, 플러그인
+          Copy-Item "$obs/bin/64bit/*" $bin -Recurse -Force
+          Copy-Item "$obs/data" "$dist/data" -Recurse -Force
+          Copy-Item "$obs/obs-plugins" "$dist/obs-plugins" -Recurse -Force
+
+          # OBS 프로그램 본체와 OBS용 Qt는 제외 (ERShorts는 자체 Qt 사용)
+          Remove-Item "$bin/obs64.exe", "$bin/Qt6*.dll", "$bin/obs-frontend-api.dll", "$bin/*.pdb" -Force -ErrorAction SilentlyContinue
+          foreach ($d in 'platforms','styles','imageformats','iconengines','tls','networkinformation','generic','translations') {
+            Remove-Item "$bin/$d" -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          Remove-Item "$dist/data/obs-studio" -Recurse -Force -ErrorAction SilentlyContinue
+          Get-ChildItem "$dist/obs-plugins" -Recurse -Filter *.pdb | Remove-Item -Force
+          # Qt UI를 쓰는 OBS 플러그인은 필요 없음
+          foreach ($p in 'frontend-tools','obs-websocket','decklink-captions','decklink-output-ui','aja-output-ui','obs-vst','obs-browser','obs-scripting') {
+            Remove-Item "$dist/obs-plugins/64bit/$p.dll" -Force -ErrorAction SilentlyContinue
+            Remove-Item "$dist/data/obs-plugins/$p" -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+          # (2) ERShorts 본체 + 맨 위 실행기
+          Copy-Item "build/dist/bin/64bit/ERShorts.exe" $bin -Force
+          Copy-Item "build/dist/ERShorts.exe" $dist -Force
+
+          # (3) Qt 런타임 (FFmpeg 미디어 백엔드는 OBS의 FFmpeg DLL과 겹치므로 제외 → Windows 기본 백엔드 사용)
+          & "$env:QT_ROOT_DIR/bin/windeployqt.exe" --release --no-translations --no-opengl-sw `
+            --exclude-plugins ffmpegmediaplugin "$bin/ERShorts.exe"
+          if ($LASTEXITCODE -ne 0) { throw "windeployqt 실패" }
+          # 혹시 덮어써졌을 경우를 대비해 OBS의 FFmpeg DLL을 다시 복사
+          Copy-Item "$obs/bin/64bit/av*.dll", "$obs/bin/64bit/sw*.dll" $bin -Force -ErrorAction SilentlyContinue
+
+          # (4) ffmpeg.exe (쇼츠 내보내기, BPM 감지용)
+          Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp
+          Copy-Item (Get-ChildItem ffmpeg-tmp -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName $bin
+
+          # (5) Visual C++ 런타임 DLL (PC에 설치돼 있지 않아도 실행되도록)
+          $crt = Get-ChildItem "C:/Program Files/Microsoft Visual Studio" -Recurse -Filter vcruntime140.dll -ErrorAction SilentlyContinue |
+                 Where-Object FullName -match 'Redist\\MSVC\\[^\\]+\\x64\\Microsoft\.VC\d+\.CRT' |
+                 Sort-Object FullName -Descending | Select-Object -First 1
+          if ($crt) { Copy-Item "$($crt.DirectoryName)/*.dll" $bin -Force } else { Write-Warning "VC++ 런타임을 찾지 못했습니다" }
+
+          # (6) 안내 파일
+          Copy-Item "app/README.md" "$dist/README.md"
+          @"
+          ERShorts 실행 방법
+          ==================
+          1. 이 폴더 전체를 원하는 곳에 압축 해제하세요 (폴더 구조를 바꾸지 마세요).
+          2. 맨 위의 ERShorts.exe 를 더블클릭하면 실행됩니다.
+          3. 처음 실행할 때 Windows가 '알 수 없는 게시자' 경고를 띄우면
+          '추가 정보' → '실행' 을 누르세요 (코드 서명이 없는 개인 빌드라서 나오는 경고입니다).
+          4. 클립: 동영상\ERShorts\clips   결과: 동영상\ERShorts\shorts
+          "@ | Out-File "$dist/실행방법.txt" -Encoding utf8
+
+          Get-ChildItem $dist | Format-Table Name, Length
+
+      - name: 압축
+        run: Compress-Archive -Path "${{ github.workspace }}/ERShorts" -DestinationPath ERShorts-windows-x64.zip
+
+      - name: 결과물 업로드 (Actions → Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ERShorts-windows-x64
+          path: ERShorts-windows-x64.zip
+          retention-days: 30
+
+      - name: 릴리스에 업로드 (v 태그일 때)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ERShorts-windows-x64.zip
