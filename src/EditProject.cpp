@@ -332,6 +332,26 @@ double EditProject::beatPulseAt(double t, double *phase) const
 	return std::exp(-ph / BeatFx::kDecay);
 }
 
+QRect EditProject::bandCropRect(QSize source) const
+{
+	const double W = std::max(2, source.width());
+	const double H = std::max(2, source.height());
+	const double ar = 1080.0 / std::max(2, bands.middleHeight()); // 가운데 영역의 가로/세로 비율
+	const double z = std::clamp(bands.zoom, 1.0, 3.0);
+	double cw = std::min(W, H * ar) / z;
+	double ch = cw / ar;
+	if (ch > H) { // 띠가 얇아 가운데가 원본보다 세로로 길면 세로 기준으로 맞춤
+		ch = H / z;
+		cw = ch * ar;
+	}
+	const int iw = std::max(2, int(cw) & ~1);
+	const int ih = std::max(2, int(ch) & ~1);
+	const int x = int((W - iw) / 2) & ~1;
+	const double free = (H - ih) / 2;
+	const int y = std::clamp(int(free * (1.0 + std::clamp(bands.offsetY, -1.0, 1.0))) & ~1, 0, int(H) - ih);
+	return QRect(x, y, iw, ih);
+}
+
 // ─── 저장/불러오기 ─────────────────────────────────────
 static QJsonObject cardToJson(const TitleCard &c)
 {
@@ -390,6 +410,13 @@ QJsonObject EditProject::toJson() const
 		{"beatFx", QJsonObject{{"zoom", beatFx.zoom}, {"shake", beatFx.shake},
 				       {"strength", beatFx.strength}, {"every", beatFx.every}}},
 		{"layout", int(layout)},
+		{"bands", QJsonObject{{"top", bands.topHeight}, {"bottom", bands.bottomHeight},
+				      {"background", bands.background.name()}, {"title", bands.title},
+				      {"titleSize", bands.titleSize}, {"titleColor", bands.titleColor.name()},
+				      {"subtitle", bands.subtitle}, {"subtitleSize", bands.subtitleSize},
+				      {"subtitleColor", bands.subtitleColor.name()}, {"bottomText", bands.bottomText},
+				      {"bottomSize", bands.bottomSize}, {"bottomColor", bands.bottomColor.name()},
+				      {"zoom", bands.zoom}, {"offsetY", bands.offsetY}}},
 		{"minimap", QJsonArray{minimapRect.x(), minimapRect.y(), minimapRect.width(), minimapRect.height()}},
 	};
 }
@@ -461,7 +488,23 @@ void EditProject::fromJson(const QJsonObject &o)
 	beatFx.shake = fx.value("shake").toBool();
 	beatFx.strength = std::clamp(fx.value("strength").toInt(1), 0, 2);
 	beatFx.every = std::clamp(fx.value("every").toInt(1), 1, 8);
-	layout = ShortsLayout(std::clamp(o.value("layout").toInt(0), 0, 2));
+	layout = ShortsLayout(std::clamp(o.value("layout").toInt(int(ShortsLayout::TitleBands)), 0, 3));
+	const QJsonObject b = o.value("bands").toObject();
+	const TitleBands def;
+	bands.topHeight = std::clamp(b.value("top").toInt(def.topHeight), 0, 800) & ~1;
+	bands.bottomHeight = std::clamp(b.value("bottom").toInt(def.bottomHeight), 0, 800) & ~1;
+	bands.background = QColor(b.value("background").toString(def.background.name()));
+	bands.title = b.value("title").toString();
+	bands.titleSize = std::clamp(b.value("titleSize").toInt(def.titleSize), 20, 220);
+	bands.titleColor = QColor(b.value("titleColor").toString(def.titleColor.name()));
+	bands.subtitle = b.value("subtitle").toString();
+	bands.subtitleSize = std::clamp(b.value("subtitleSize").toInt(def.subtitleSize), 20, 160);
+	bands.subtitleColor = QColor(b.value("subtitleColor").toString(def.subtitleColor.name()));
+	bands.bottomText = b.value("bottomText").toString();
+	bands.bottomSize = std::clamp(b.value("bottomSize").toInt(def.bottomSize), 20, 160);
+	bands.bottomColor = QColor(b.value("bottomColor").toString(def.bottomColor.name()));
+	bands.zoom = std::clamp(b.value("zoom").toDouble(1.0), 1.0, 3.0);
+	bands.offsetY = std::clamp(b.value("offsetY").toDouble(0.0), -1.0, 1.0);
 	const QJsonArray mm = o.value("minimap").toArray();
 	if (mm.size() == 4)
 		minimapRect = QRectF(mm[0].toDouble(), mm[1].toDouble(), mm[2].toDouble(), mm[3].toDouble());

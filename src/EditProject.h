@@ -2,6 +2,7 @@
 
 #include <QColor>
 #include <QJsonObject>
+#include <QRect>
 #include <QRectF>
 #include <QSize>
 #include <QString>
@@ -101,7 +102,29 @@ struct BeatFx {
 	static constexpr double kDecay = 0.12; // 펄스가 사라지는 속도(초)
 };
 
-enum class ShortsLayout { CenterCrop = 0, CropWithMinimap = 1, BlurBackground = 2 };
+enum class ShortsLayout { CenterCrop = 0, CropWithMinimap = 1, BlurBackground = 2, TitleBands = 3 };
+
+// "제목 띠" 레이아웃: 위/아래에 단색 띠를 두고 글씨를 넣음, 가운데는 게임 화면
+struct TitleBands {
+	int topHeight = 330;    // 1080x1920 캔버스 기준 px
+	int bottomHeight = 330;
+	QColor background = Qt::black;
+
+	QString title;          // 위 띠 큰 글씨 (여러 줄 가능)
+	int titleSize = 110;
+	QColor titleColor = Qt::white;
+	QString subtitle;       // 위 띠 작은 글씨
+	int subtitleSize = 60;
+	QColor subtitleColor = QColor("#FFE14D");
+	QString bottomText;     // 아래 띠 글씨
+	int bottomSize = 64;
+	QColor bottomColor = Qt::white;
+
+	double zoom = 1.0;      // 가운데 영상 확대 (1.0 ~ 2.0)
+	double offsetY = 0.0;   // 가운데 영상 세로 위치 (-1 = 위쪽, 0 = 가운데, 1 = 아래쪽)
+
+	int middleHeight() const { return 1920 - topHeight - bottomHeight; }
+};
 
 struct EditProject {
 	QString filePath; // 프로젝트 저장 위치 (.json)
@@ -115,7 +138,10 @@ struct EditProject {
 	BeatFx beatFx;
 	double gameVolume = 1.0;
 
-	ShortsLayout layout = ShortsLayout::CenterCrop;
+	ShortsLayout layout = ShortsLayout::TitleBands;
+	TitleBands bands;
+	// 제목 띠 레이아웃에서 원본 영상 중 가운데 영역으로 쓸 부분 (원본 픽셀, 짝수)
+	QRect bandCropRect(QSize source) const;
 	QRectF minimapRect{0.80, 0.63, 0.19, 0.35};
 
 	// 클립 추가 (전체 길이를 하나의 구간으로 타임라인 끝에 붙임)

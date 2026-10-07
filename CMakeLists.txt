@@ -30,6 +30,7 @@ add_executable(ERShorts WIN32
   src/BeatDetector.h      src/BeatDetector.cpp
   src/ThumbnailCache.h    src/ThumbnailCache.cpp
   src/Diagnostics.h       src/Diagnostics.cpp
+  src/BandLayout.h        src/BandLayout.cpp
 )
 
 target_link_libraries(ERShorts PRIVATE

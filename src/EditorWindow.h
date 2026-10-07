@@ -58,6 +58,9 @@ private:
 	QWidget *buildMusicTab();
 	QWidget *buildSubtitleTab();
 	QWidget *buildCardTab();
+	QWidget *buildLayoutTab();
+	void rebuildBandVisuals();
+	void onBandPropsChanged();
 	QWidget *buildExportTab();
 	void setupShortcuts();
 	void loadUiFromProject(bool keepPosition = false);
@@ -164,6 +167,10 @@ private:
 	QGraphicsScene *m_scene = nullptr;
 	QGraphicsRectItem *m_canvas = nullptr;
 	QGraphicsRectItem *m_minimapHint = nullptr;
+	QGraphicsRectItem *m_videoClip = nullptr; // 영상이 보이는 영역 (제목 띠일 때 가운데만)
+	QGraphicsRectItem *m_bandTop = nullptr;
+	QGraphicsRectItem *m_bandBottom = nullptr;
+	QVector<QGraphicsSimpleTextItem *> m_bandTexts;
 	QGraphicsRectItem *m_flashOverlay = nullptr;
 	QGraphicsRectItem *m_cardItem = nullptr;
 	QGraphicsSimpleTextItem *m_cardTitle = nullptr;
@@ -234,6 +241,16 @@ private:
 		QPushButton *color = nullptr;
 	};
 	CardUi m_introUi, m_outroUi;
+
+	// 화면 구성 탭 (제목 띠)
+	QWidget *m_bandBox = nullptr;
+	QPlainTextEdit *m_bandTitle = nullptr;
+	QLineEdit *m_bandSubtitle = nullptr;
+	QPlainTextEdit *m_bandBottomText = nullptr;
+	QSpinBox *m_bandTitleSize = nullptr, *m_bandSubSize = nullptr, *m_bandBottomSize = nullptr;
+	QPushButton *m_bandTitleColor = nullptr, *m_bandSubColor = nullptr, *m_bandBottomColor = nullptr,
+		    *m_bandBg = nullptr;
+	QSlider *m_bandTopH = nullptr, *m_bandBottomH = nullptr, *m_bandZoom = nullptr, *m_bandOffset = nullptr;
 
 	// 내보내기 탭
 	QComboBox *m_layout = nullptr;

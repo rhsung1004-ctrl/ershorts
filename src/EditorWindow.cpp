@@ -1,5 +1,6 @@
 #include "EditorWindow.h"
 
+#include "BandLayout.h"
 #include "BeatDetector.h"
 #include "ShortsExporter.h"
 #include "ThumbnailCache.h"
@@ -214,6 +215,21 @@ void EditorWindow::buildUi()
 	m_canvas->setFlag(QGraphicsItem::ItemClipsChildrenToShape);
 	m_scene->addItem(m_canvas);
 
+	// 영상은 이 사각형 안에서만 보임 (제목 띠 레이아웃에서 가운데 영역으로 잘라냄)
+	m_videoClip = new QGraphicsRectItem(0, 0, kCanvasW, kCanvasH, m_canvas);
+	m_videoClip->setPen(Qt::NoPen);
+	m_videoClip->setBrush(Qt::NoBrush);
+	m_videoClip->setFlag(QGraphicsItem::ItemClipsChildrenToShape);
+	m_videoClip->setZValue(0);
+
+	m_bandTop = new QGraphicsRectItem(m_canvas);
+	m_bandBottom = new QGraphicsRectItem(m_canvas);
+	for (QGraphicsRectItem *b : {m_bandTop, m_bandBottom}) {
+		b->setPen(Qt::NoPen);
+		b->setZValue(6);
+		b->setVisible(false);
+	}
+
 	m_minimapHint = new QGraphicsRectItem(m_canvas);
 	m_minimapHint->setPen(QPen(QColor(255, 255, 255, 200), 4, Qt::DashLine));
 	m_minimapHint->setZValue(5);
@@ -284,7 +300,11 @@ void EditorWindow::buildUi()
 	m_tabs->addTab(scrollable(buildSegmentTab()), "구간·효과");
 	m_tabs->addTab(scrollable(buildMusicTab()), "음악");
 	m_tabs->addTab(scrollable(buildSubtitleTab()), "자막");
-	m_tabs->addTab(scrollable(buildCardTab()), "인트로/아웃트로");
+	m_tabs->addTab(scrollable(buildLayoutTab()), "화면 구성");
+	// 인트로/아웃트로는 화면에서 뺐음 (예전 프로젝트 호환을 위해 설정만 유지)
+	QWidget *cards = buildCardTab();
+	cards->setParent(this);
+	cards->hide();
 	m_tabs->addTab(scrollable(buildExportTab()), "내보내기");
 	split->addWidget(m_tabs);
 	split->setStretchFactor(0, 1);
@@ -738,21 +758,127 @@ QWidget *EditorWindow::buildCardTab()
 	return w;
 }
 
+QWidget *EditorWindow::buildLayoutTab()
+{
+	auto *w = new QWidget;
+	auto *lay = new QVBoxLayout(w);
+
+	auto *top = new QFormLayout;
+	m_layout = new QComboBox;
+	m_layout->addItem("제목 띠 (위/아래에 글씨)", int(ShortsLayout::TitleBands));
+	m_layout->addItem("가운데 크롭 (9:16 꽉 채움)", int(ShortsLayout::CenterCrop));
+	m_layout->addItem("가운데 크롭 + 미니맵", int(ShortsLayout::CropWithMinimap));
+	m_layout->addItem("원본 + 흐린 배경", int(ShortsLayout::BlurBackground));
+	connect(m_layout, &QComboBox::currentIndexChanged, this, [this] {
+		if (m_syncing)
+			return;
+		m_project.layout = ShortsLayout(m_layout->currentData().toInt());
+		m_bandBox->setEnabled(m_project.layout == ShortsLayout::TitleBands);
+		applyLayoutToPreview();
+		projectChanged();
+	});
+	top->addRow("레이아웃", m_layout);
+	lay->addLayout(top);
+
+	auto *box = new QGroupBox("제목 띠");
+	m_bandBox = box;
+	auto *f = new QFormLayout(box);
+
+	auto sizeSpin = [](int lo, int hi) {
+		auto *sp = new QSpinBox;
+		sp->setRange(lo, hi);
+		sp->setSuffix(" px");
+		return sp;
+	};
+	auto styleRow = [](QSpinBox *sp, QPushButton *color) {
+		auto *row = new QHBoxLayout;
+		row->addWidget(new QLabel("크기"));
+		row->addWidget(sp);
+		row->addSpacing(8);
+		row->addWidget(new QLabel("색"));
+		row->addWidget(color);
+		row->addStretch();
+		return row;
+	};
+
+	m_bandTitle = new QPlainTextEdit;
+	m_bandTitle->setMaximumHeight(60);
+	m_bandTitle->setPlaceholderText("위 띠 제목 (예: 1대3 역관광)");
+	m_bandTitleSize = sizeSpin(20, 220);
+	m_bandTitleColor = makeColorButton(&m_project.bands.titleColor, [this] { onBandPropsChanged(); });
+	f->addRow("제목", m_bandTitle);
+	f->addRow("", styleRow(m_bandTitleSize, m_bandTitleColor));
+
+	m_bandSubtitle = new QLineEdit;
+	m_bandSubtitle->setPlaceholderText("제목 아래 작은 글씨 (예: 아델라 장인의 하루)");
+	m_bandSubSize = sizeSpin(20, 160);
+	m_bandSubColor = makeColorButton(&m_project.bands.subtitleColor, [this] { onBandPropsChanged(); });
+	f->addRow("부제", m_bandSubtitle);
+	f->addRow("", styleRow(m_bandSubSize, m_bandSubColor));
+
+	m_bandBottomText = new QPlainTextEdit;
+	m_bandBottomText->setMaximumHeight(60);
+	m_bandBottomText->setPlaceholderText("아래 띠 문구 (예: 끝까지 보세요)");
+	m_bandBottomSize = sizeSpin(20, 160);
+	m_bandBottomColor = makeColorButton(&m_project.bands.bottomColor, [this] { onBandPropsChanged(); });
+	f->addRow("아래 문구", m_bandBottomText);
+	f->addRow("", styleRow(m_bandBottomSize, m_bandBottomColor));
+
+	auto slider = [](int lo, int hi, int step) {
+		auto *s = new QSlider(Qt::Horizontal);
+		s->setRange(lo, hi);
+		s->setSingleStep(step);
+		s->setPageStep(step * 5);
+		return s;
+	};
+	m_bandTopH = slider(0, 700, 10);
+	m_bandBottomH = slider(0, 700, 10);
+	m_bandBg = makeColorButton(&m_project.bands.background, [this] { onBandPropsChanged(); });
+	m_bandZoom = slider(100, 200, 5);
+	m_bandOffset = slider(-100, 100, 5);
+	f->addRow("위 띠 높이", m_bandTopH);
+	f->addRow("아래 띠 높이", m_bandBottomH);
+	f->addRow("띠 색", m_bandBg);
+	f->addRow("영상 확대", m_bandZoom);
+	f->addRow("영상 세로 위치", m_bandOffset);
+	f->addRow(helpLabel("가운데 게임 화면은 9:16보다 넓게 잘라서 더 많이 보입니다. 긴 글씨는 화면 폭에 맞게 "
+			    "자동으로 작아져요. 영상 확대/세로 위치로 캐릭터가 잘 보이게 맞추세요."));
+	lay->addWidget(box);
+	lay->addStretch();
+
+	connect(m_bandTitle, &QPlainTextEdit::textChanged, this, &EditorWindow::onBandPropsChanged);
+	connect(m_bandSubtitle, &QLineEdit::textChanged, this, &EditorWindow::onBandPropsChanged);
+	connect(m_bandBottomText, &QPlainTextEdit::textChanged, this, &EditorWindow::onBandPropsChanged);
+	for (QSpinBox *sp : {m_bandTitleSize, m_bandSubSize, m_bandBottomSize})
+		connect(sp, &QSpinBox::valueChanged, this, &EditorWindow::onBandPropsChanged);
+	for (QSlider *sl : {m_bandTopH, m_bandBottomH, m_bandZoom, m_bandOffset})
+		connect(sl, &QSlider::valueChanged, this, &EditorWindow::onBandPropsChanged);
+	return w;
+}
+
+void EditorWindow::onBandPropsChanged()
+{
+	if (m_syncing)
+		return;
+	TitleBands &b = m_project.bands;
+	b.title = m_bandTitle->toPlainText();
+	b.subtitle = m_bandSubtitle->text();
+	b.bottomText = m_bandBottomText->toPlainText();
+	b.titleSize = m_bandTitleSize->value();
+	b.subtitleSize = m_bandSubSize->value();
+	b.bottomSize = m_bandBottomSize->value();
+	b.topHeight = m_bandTopH->value() & ~1;
+	b.bottomHeight = m_bandBottomH->value() & ~1;
+	b.zoom = m_bandZoom->value() / 100.0;
+	b.offsetY = m_bandOffset->value() / 100.0;
+	applyLayoutToPreview();
+	projectChanged();
+}
+
 QWidget *EditorWindow::buildExportTab()
 {
 	auto *w = new QWidget;
 	auto *form = new QFormLayout(w);
-
-	m_layout = new QComboBox;
-	m_layout->addItems({"가운데 크롭", "가운데 크롭 + 미니맵", "원본 + 흐린 배경"});
-	connect(m_layout, &QComboBox::currentIndexChanged, this, [this](int i) {
-		if (m_syncing)
-			return;
-		m_project.layout = ShortsLayout(i);
-		applyLayoutToPreview();
-		projectChanged();
-	});
-	form->addRow("레이아웃", m_layout);
 
 	m_outName = new QLineEdit(QFileInfo(m_project.filePath).completeBaseName());
 	form->addRow("파일 이름", m_outName);
@@ -860,7 +986,25 @@ void EditorWindow::loadUiFromProject(bool keepPosition)
 	loadCard(m_introUi, m_project.intro);
 	loadCard(m_outroUi, m_project.outro);
 
-	m_layout->setCurrentIndex(int(m_project.layout));
+	m_layout->setCurrentIndex(std::max(0, m_layout->findData(int(m_project.layout))));
+	m_bandBox->setEnabled(m_project.layout == ShortsLayout::TitleBands);
+	{
+		const TitleBands &b = m_project.bands;
+		m_bandTitle->setPlainText(b.title);
+		m_bandSubtitle->setText(b.subtitle);
+		m_bandBottomText->setPlainText(b.bottomText);
+		m_bandTitleSize->setValue(b.titleSize);
+		m_bandSubSize->setValue(b.subtitleSize);
+		m_bandBottomSize->setValue(b.bottomSize);
+		paintColorButton(m_bandTitleColor, b.titleColor);
+		paintColorButton(m_bandSubColor, b.subtitleColor);
+		paintColorButton(m_bandBottomColor, b.bottomColor);
+		paintColorButton(m_bandBg, b.background);
+		m_bandTopH->setValue(b.topHeight);
+		m_bandBottomH->setValue(b.bottomHeight);
+		m_bandZoom->setValue(int(std::lround(b.zoom * 100)));
+		m_bandOffset->setValue(int(std::lround(b.offsetY * 100)));
+	}
 	m_syncing = false;
 
 	refreshClipList();
@@ -899,7 +1043,7 @@ void EditorWindow::createPlayerFor(int i)
 	sp.player = new QMediaPlayer(this);
 	sp.audio = new QAudioOutput(this);
 	sp.player->setAudioOutput(sp.audio);
-	sp.item = new QGraphicsVideoItem(m_canvas);
+	sp.item = new QGraphicsVideoItem(m_videoClip);
 	sp.item->setAspectRatioMode(Qt::IgnoreAspectRatio);
 	sp.item->setVisible(false);
 	sp.player->setVideoOutput(sp.item);
@@ -1138,8 +1282,15 @@ void EditorWindow::updateTimeLabel(double t)
 // ═════════════════════════════════════════════════════════════
 void EditorWindow::applyLayoutToPreview()
 {
-	const bool blur = (m_project.layout == ShortsLayout::BlurBackground);
+	const ShortsLayout layout = m_project.layout;
+	const bool blur = (layout == ShortsLayout::BlurBackground);
+	const bool bands = (layout == ShortsLayout::TitleBands);
 	m_canvas->setBrush(blur ? QColor("#22222A") : QColor("#111114"));
+
+	const TitleBands &tb = m_project.bands;
+	const double midTop = bands ? tb.topHeight : 0.0;
+	const double midH = bands ? tb.middleHeight() : kCanvasH;
+	m_videoClip->setRect(0, midTop, kCanvasW, midH);
 
 	for (int i = 0; i < m_players.size() && i < m_project.sources.size(); ++i) {
 		const QSize s = m_project.sources[i].size;
@@ -1147,7 +1298,13 @@ void EditorWindow::applyLayoutToPreview()
 		const double sh = std::max(1, s.height());
 		QGraphicsVideoItem *item = m_players[i].item;
 		QPointF pos;
-		if (blur) {
+		if (bands) {
+			// 원본에서 잘라낼 영역이 가운데 칸(1080 x midH)에 꽉 차도록 배치
+			const QRect c = m_project.bandCropRect(s);
+			const double k = kCanvasW / std::max(1, c.width());
+			item->setSize(QSizeF(sw * k, sh * k));
+			pos = QPointF(-c.x() * k, midTop - c.y() * k);
+		} else if (blur) {
 			const double h = kCanvasW * sh / sw;
 			item->setSize(QSizeF(kCanvasW, h));
 			pos = QPointF(0, (kCanvasH - h) / 2);
@@ -1161,7 +1318,7 @@ void EditorWindow::applyLayoutToPreview()
 		item->setTransformOriginPoint(item->size().width() / 2, item->size().height() / 2);
 	}
 
-	const bool mm = (m_project.layout == ShortsLayout::CropWithMinimap);
+	const bool mm = (layout == ShortsLayout::CropWithMinimap);
 	m_minimapHint->setVisible(mm);
 	if (mm) {
 		const QSize s = m_project.sources.isEmpty() ? QSize(1920, 1080) : m_project.sources.first().size;
@@ -1170,7 +1327,39 @@ void EditorWindow::applyLayoutToPreview()
 		const double mh = mw * (r.height() * s.height()) / (r.width() * std::max(1, s.width()));
 		m_minimapHint->setRect(kCanvasW - 28 - mw, 150, mw, mh);
 	}
+	rebuildBandVisuals();
 }
+
+void EditorWindow::rebuildBandVisuals()
+{
+	qDeleteAll(m_bandTexts);
+	m_bandTexts.clear();
+
+	const bool bands = (m_project.layout == ShortsLayout::TitleBands);
+	const TitleBands &tb = m_project.bands;
+	m_bandTop->setVisible(bands && tb.topHeight > 0);
+	m_bandBottom->setVisible(bands && tb.bottomHeight > 0);
+	if (!bands)
+		return;
+	m_bandTop->setRect(0, 0, kCanvasW, tb.topHeight);
+	m_bandBottom->setRect(0, kCanvasH - tb.bottomHeight, kCanvasW, tb.bottomHeight);
+	m_bandTop->setBrush(tb.background);
+	m_bandBottom->setBrush(tb.background);
+
+	for (const BandLine &l : BandLayout::lines(m_project)) {
+		auto *t = new QGraphicsSimpleTextItem(l.text, m_canvas);
+		QFont f(BandLayout::fontFamily());
+		f.setBold(true);
+		f.setPixelSize(l.size);
+		t->setFont(f);
+		t->setBrush(l.color);
+		t->setZValue(7);
+		const QRectF br = t->boundingRect();
+		t->setPos((kCanvasW - br.width()) / 2, l.slotTop + (l.slotHeight - br.height()) / 2);
+		m_bandTexts.push_back(t);
+	}
+}
+
 
 void EditorWindow::rebuildSubtitleVisuals()
 {

@@ -1,5 +1,7 @@
 #include "ShortsExporter.h"
 
+#include "BandLayout.h"
+
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -98,6 +100,37 @@ QVector<QPair<double, double>> rampAudioChunks(const Segment &s, QVector<double>
 }
 constexpr double kDip = 0.15; // 블랙 페이드 절반 길이
 } // namespace
+
+// 비트마다 줌/흔들림. timeShift: 이 스트림의 0초가 결과 영상의 몇 초인지 (인트로 길이 등)
+static QString beatFxChain(const EditProject &p, int w, int h, double timeShift)
+{
+	double P, O;
+	if (!p.beatPulseGrid(&P, &O))
+		return {};
+	const double A = p.introDuration();
+	const double B = p.segmentsEnd();
+	// 마지막 비트 이후 경과 시간 = mod(t-O, P), 세기 = exp(-경과/감쇠)
+	const QString gate = QString("between(%1,%2,%3)*gte(%1,%4)").arg(QStringLiteral("%T"), n6(A), n6(B), n6(O));
+	const QString env = QString("exp(-mod(%T-%1,%2)/%3)").arg(n6(O), n6(P), n6(BeatFx::kDecay));
+	auto expr = [&](const QString &var, const QString &body) {
+		const QString v = timeShift > 0 ? QString("(%1+%2)").arg(var, n6(timeShift)) : var;
+		return QString(body).replace("%T", v);
+	};
+	QStringList fx;
+	if (p.beatFx.shake) {
+		const QString amp = n6(p.beatFx.shakeAmount());
+		fx << expr("t", QString("crop=w=iw*0.94:h=ih*0.94:"
+					"x='(iw-ow)/2+%1*iw*%2*sin(mod(%T-%3,%4)*70)*%5':"
+					"y='(ih-oh)/2+%1*ih*%2*0.5*cos(mod(%T-%3,%4)*55)*%5',scale=%6:%7")
+					.arg(gate, amp, n6(O), n6(P), env, QString::number(w), QString::number(h)));
+	}
+	if (p.beatFx.zoom) {
+		fx << expr("it", QString("zoompan=z='1+%1*%2*%3':d=1:x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':"
+					 "s=%4x%5:fps=60")
+					 .arg(gate, n6(p.beatFx.zoomAmount()), env, QString::number(w), QString::number(h)));
+	}
+	return fx.join(',');
+}
 
 ShortsExporter::ShortsExporter(QObject *parent) : QObject(parent)
 {
@@ -253,6 +286,34 @@ QString ShortsExporter::buildFilter()
 			     .arg(num(r.width()), num(r.height()), num(r.x()), num(r.y()));
 		break;
 	}
+	case ShortsLayout::TitleBands: {
+		// 가운데: 원본에서 잘라낸 영역 → 1080 x (1920 - 위 띠 - 아래 띠), 비트 효과는 여기에만
+		const QRect c = p.bandCropRect(QSize(W, H));
+		const int mid = p.bands.middleHeight();
+		QString m = QString("[cv]crop=%1:%2:%3:%4,scale=1080:%5:flags=lanczos,setsar=1")
+				    .arg(c.width())
+				    .arg(c.height())
+				    .arg(c.x())
+				    .arg(c.y())
+				    .arg(mid);
+		const QString fx = beatFxChain(p, 1080, mid, p.introDuration());
+		if (!fx.isEmpty())
+			m += "," + fx;
+		g << m + "[mid]";
+
+		// 위/아래 띠 + 글씨 (줄마다 가운데 정렬)
+		const QString bandFont = filterPath("C:/Windows/Fonts/malgunbd.ttf");
+		QString b = QString("[mid]pad=1080:1920:0:%1:color=%2").arg(p.bands.topHeight).arg(hexColor(p.bands.background));
+		int k = 0;
+		for (const BandLine &l : BandLayout::lines(p)) {
+			b += QString(",drawtext=fontfile=%1:textfile=%2:fontsize=%3:fontcolor=%4:x=(w-text_w)/2:y=%5+(%6-text_h)/2")
+				     .arg(bandFont, filterPath(writeTextFile(QString("band_%1.txt").arg(k++), l.text)))
+				     .arg(l.size)
+				     .arg(hexColor(l.color), n6(l.slotTop), n6(l.slotHeight));
+		}
+		g << b + "[base]";
+		break;
+	}
 	case ShortsLayout::BlurBackground:
 		g << "[cv]split=2[bg0][fg0];"
 		     "[bg0]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
@@ -317,32 +378,14 @@ QString ShortsExporter::buildFilter()
 		texts << dt;
 	}
 	// ── 6) 비트 효과 (자막보다 먼저 → 자막은 흔들리지 않음) ──
+	//    제목 띠 레이아웃은 가운데 영상에만 이미 적용했으므로 여기서는 건너뜀
 	QString vlabel = "[allv]";
-	double P, O;
-	if (p.beatPulseGrid(&P, &O)) {
-		const double A = p.introDuration();
-		const double B = p.segmentsEnd();
-		// 마지막 비트 이후 경과 시간 = mod(t-O, P), 세기 = exp(-경과/감쇠)
-		const QString gate = QString("between(%1,%2,%3)*gte(%1,%4)").arg(QStringLiteral("%T"), n6(A), n6(B), n6(O));
-		const QString env = QString("exp(-mod(%T-%1,%2)/%3)").arg(n6(O), n6(P), n6(BeatFx::kDecay));
-		auto expr = [&](const QString &var, const QString &body) {
-			return QString(body).replace("%T", var);
-		};
-		QStringList fx;
-		if (p.beatFx.shake) {
-			const QString amp = n6(p.beatFx.shakeAmount());
-			fx << expr("t", QString("crop=w=iw*0.94:h=ih*0.94:"
-						"x='(iw-ow)/2+%1*iw*%2*sin(mod(%T-%3,%4)*70)*%5':"
-						"y='(ih-oh)/2+%1*ih*%2*0.5*cos(mod(%T-%3,%4)*55)*%5',scale=1080:1920")
-						.arg(gate, amp, n6(O), n6(P), env));
+	if (p.layout != ShortsLayout::TitleBands) {
+		const QString fx = beatFxChain(p, 1080, 1920, 0.0);
+		if (!fx.isEmpty()) {
+			g << vlabel + fx + "[fxv]";
+			vlabel = "[fxv]";
 		}
-		if (p.beatFx.zoom) {
-			fx << expr("it", QString("zoompan=z='1+%1*%2*%3':d=1:x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':"
-						 "s=1080x1920:fps=60")
-						 .arg(gate, n6(p.beatFx.zoomAmount()), env));
-		}
-		g << vlabel + fx.join(',') + "[fxv]";
-		vlabel = "[fxv]";
 	}
 
 	// ── 7) 자막 → (미리보기 품질이면) 축소 ──
