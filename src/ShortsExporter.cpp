@@ -316,7 +316,42 @@ QString ShortsExporter::buildFilter()
 			dt += ":box=1:boxcolor=black@0.4:boxborderw=22";
 		texts << dt;
 	}
-	g << "[allv]" + (texts.isEmpty() ? QStringLiteral("null") : texts.join(',')) + "[v]";
+	// ── 6) 비트 효과 (자막보다 먼저 → 자막은 흔들리지 않음) ──
+	QString vlabel = "[allv]";
+	double P, O;
+	if (p.beatPulseGrid(&P, &O)) {
+		const double A = p.introDuration();
+		const double B = p.segmentsEnd();
+		// 마지막 비트 이후 경과 시간 = mod(t-O, P), 세기 = exp(-경과/감쇠)
+		const QString gate = QString("between(%1,%2,%3)*gte(%1,%4)").arg(QStringLiteral("%T"), n6(A), n6(B), n6(O));
+		const QString env = QString("exp(-mod(%T-%1,%2)/%3)").arg(n6(O), n6(P), n6(BeatFx::kDecay));
+		auto expr = [&](const QString &var, const QString &body) {
+			return QString(body).replace("%T", var);
+		};
+		QStringList fx;
+		if (p.beatFx.shake) {
+			const QString amp = n6(p.beatFx.shakeAmount());
+			fx << expr("t", QString("crop=w=iw*0.94:h=ih*0.94:"
+						"x='(iw-ow)/2+%1*iw*%2*sin(mod(%T-%3,%4)*70)*%5':"
+						"y='(ih-oh)/2+%1*ih*%2*0.5*cos(mod(%T-%3,%4)*55)*%5',scale=1080:1920")
+						.arg(gate, amp, n6(O), n6(P), env));
+		}
+		if (p.beatFx.zoom) {
+			fx << expr("it", QString("zoompan=z='1+%1*%2*%3':d=1:x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':"
+						 "s=1080x1920:fps=60")
+						 .arg(gate, n6(p.beatFx.zoomAmount()), env));
+		}
+		g << vlabel + fx.join(',') + "[fxv]";
+		vlabel = "[fxv]";
+	}
+
+	// ── 7) 자막 → (미리보기 품질이면) 축소 ──
+	if (m_previewQuality) {
+		g << vlabel + (texts.isEmpty() ? QStringLiteral("null") : texts.join(',')) + "[subv]";
+		g << "[subv]scale=540:960:flags=bilinear,fps=30[v]";
+	} else {
+		g << vlabel + (texts.isEmpty() ? QStringLiteral("null") : texts.join(',')) + "[v]";
+	}
 
 	return g.join(';');
 }
@@ -329,19 +364,27 @@ QStringList ShortsExporter::buildArgs(bool useHw)
 		a << "-i" << in;
 	a << "-filter_complex" << m_filter << "-map" << "[v]" << "-map" << "[aout]";
 
-	if (useHw)
-		a << "-c:v" << "h264_nvenc" << "-preset" << "p5" << "-rc" << "vbr" << "-cq" << "20"
-		  << "-b:v" << "0";
-	else
-		a << "-c:v" << "libx264" << "-preset" << "medium" << "-crf" << "19";
-
-	a << "-pix_fmt" << "yuv420p" << "-r" << "60" << "-c:a" << "aac" << "-b:a" << "192k"
-	  << "-movflags" << "+faststart" << m_output;
+	if (m_previewQuality) {
+		// 확인용: 작고 빠르게
+		if (useHw)
+			a << "-c:v" << "h264_nvenc" << "-preset" << "p1" << "-rc" << "vbr" << "-cq" << "30" << "-b:v" << "0";
+		else
+			a << "-c:v" << "libx264" << "-preset" << "ultrafast" << "-crf" << "30";
+		a << "-pix_fmt" << "yuv420p" << "-r" << "30" << "-c:a" << "aac" << "-b:a" << "128k";
+	} else {
+		if (useHw)
+			a << "-c:v" << "h264_nvenc" << "-preset" << "p5" << "-rc" << "vbr" << "-cq" << "20" << "-b:v" << "0";
+		else
+			a << "-c:v" << "libx264" << "-preset" << "medium" << "-crf" << "19";
+		a << "-pix_fmt" << "yuv420p" << "-r" << "60" << "-c:a" << "aac" << "-b:a" << "192k";
+	}
+	a << "-movflags" << "+faststart" << m_output;
 	return a;
 }
 
-void ShortsExporter::start(const EditProject &project, const QString &output)
+void ShortsExporter::start(const EditProject &project, const QString &output, bool previewQuality)
 {
+	m_previewQuality = previewQuality;
 	if (isRunning())
 		return;
 	if (project.segments.isEmpty() || !project.allSourcesReady()) {
@@ -379,7 +422,8 @@ void ShortsExporter::run(bool useHw)
 {
 	m_usingHw = useHw;
 	m_errBuf.clear();
-	emit logMessage(QString("내보내기 시작 (%1, 결과 길이 %2초)")
+	emit logMessage(QString("%1 내보내기 시작 (%2, 결과 길이 %3초)")
+				.arg(m_previewQuality ? QStringLiteral("미리보기(540x960)") : QStringLiteral("고화질"))
 				.arg(useHw ? "NVENC" : "x264")
 				.arg(m_project.totalDuration(), 0, 'f', 1));
 	emit progress(0);

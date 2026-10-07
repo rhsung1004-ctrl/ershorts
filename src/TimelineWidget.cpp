@@ -1,10 +1,12 @@
 #include "TimelineWidget.h"
 
 #include "EditProject.h"
+#include "ThumbnailCache.h"
 
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QWheelEvent>
 
 #include <algorithm>
 #include <cmath>
@@ -43,7 +45,50 @@ void TimelineWidget::setProject(EditProject *p)
 void TimelineWidget::setPosition(double t)
 {
 	m_pos = t;
+	// 확대 상태에서 재생 위치가 화면 밖으로 나가면 따라감
+	if (m_follow && m_zoom > 1.0 && m_drag == Drag::None) {
+		const double vis = visibleDuration();
+		if (t < m_viewStart || t > m_viewStart + vis * 0.92) {
+			m_viewStart = t - vis * 0.1;
+			clampView();
+		}
+	}
 	update();
+}
+
+void TimelineWidget::setZoom(double zoom, double anchorTime)
+{
+	zoom = std::clamp(zoom, 1.0, 64.0);
+	if (anchorTime < 0)
+		anchorTime = m_pos; // 기본: 재생 위치 기준
+	const double frac = (anchorTime - m_viewStart) / visibleDuration();
+	m_zoom = zoom;
+	m_viewStart = anchorTime - std::clamp(frac, 0.0, 1.0) * visibleDuration();
+	clampView();
+	emit zoomChanged(m_zoom);
+	update();
+}
+
+void TimelineWidget::clampView()
+{
+	m_viewStart = std::clamp(m_viewStart, 0.0, std::max(0.0, fitDuration() - visibleDuration()));
+}
+
+void TimelineWidget::wheelEvent(QWheelEvent *e)
+{
+	const double steps = e->angleDelta().y() / 120.0;
+	if (e->modifiers() & Qt::ControlModifier) {
+		setZoom(m_zoom * std::pow(1.25, steps), xToTime(e->position().x()));
+	} else if (m_zoom > 1.0) {
+		const double dx = (e->angleDelta().x() != 0 ? e->angleDelta().x() : e->angleDelta().y()) / 120.0;
+		m_viewStart -= dx * visibleDuration() * 0.15;
+		clampView();
+		update();
+	} else {
+		e->ignore();
+		return;
+	}
+	e->accept();
 }
 
 void TimelineWidget::setSelectedSegment(int i)
@@ -59,27 +104,29 @@ void TimelineWidget::setSelectedSubtitle(int i)
 }
 
 QRect TimelineWidget::rulerRect() const { return {kMargin, 4, width() - 2 * kMargin, 18}; }
-QRect TimelineWidget::videoRect() const { return {kMargin, 26, width() - 2 * kMargin, 48}; }
-QRect TimelineWidget::musicRect() const { return {kMargin, 78, width() - 2 * kMargin, 20}; }
-QRect TimelineWidget::subRect() const { return {kMargin, 102, width() - 2 * kMargin, 28}; }
+QRect TimelineWidget::videoRect() const { return {kMargin, 26, width() - 2 * kMargin, 58}; }
+QRect TimelineWidget::musicRect() const { return {kMargin, 88, width() - 2 * kMargin, 20}; }
+QRect TimelineWidget::subRect() const { return {kMargin, 112, width() - 2 * kMargin, 28}; }
 
-double TimelineWidget::viewDuration() const
+double TimelineWidget::fitDuration() const
 {
 	if (m_fixedViewDuration > 0)
 		return m_fixedViewDuration;
 	return m_p ? std::max(5.0, m_p->totalDuration() * 1.08) : 5.0;
 }
 
+double TimelineWidget::visibleDuration() const { return fitDuration() / m_zoom; }
+
 double TimelineWidget::xToTime(double x) const
 {
 	const QRect r = videoRect();
-	return std::max(0.0, (x - r.left()) / r.width() * viewDuration());
+	return std::max(0.0, m_viewStart + (x - r.left()) / r.width() * visibleDuration());
 }
 
 double TimelineWidget::timeToX(double t) const
 {
 	const QRect r = videoRect();
-	return r.left() + t / viewDuration() * r.width();
+	return r.left() + (t - m_viewStart) / visibleDuration() * r.width();
 }
 
 int TimelineWidget::segmentAtX(double x) const
@@ -125,23 +172,32 @@ void TimelineWidget::paintEvent(QPaintEvent *)
 	label.setPixelSize(11);
 	label.setBold(true);
 
+	// 확대했을 때 화면 밖 부분이 여백에 그려지지 않도록 트랙 영역으로 자름
+	p.setClipRect(QRect(kMargin - 8, 0, width() - 2 * kMargin + 16, height()));
+	const double viewEnd = m_viewStart + visibleDuration();
+
 	// ── 눈금 ─────────────────────
 	const QRect ruler = rulerRect();
-	const double pps = ruler.width() / viewDuration();
-	double step = 0.5;
-	for (double c : {0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0})
+	const double pps = ruler.width() / visibleDuration();
+	double step = 60.0;
+	for (double c : {0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0})
 		if (c * pps >= 56) {
 			step = c;
 			break;
 		}
 	p.setFont(small);
-	for (double t = 0; t <= viewDuration(); t += step) {
+	for (double t = std::floor(m_viewStart / step) * step; t <= viewEnd; t += step) {
+		if (t < -1e-9)
+			continue;
 		const double x = timeToX(t);
 		p.setPen(QColor("#555"));
 		p.drawLine(QPointF(x, ruler.bottom() - 4), QPointF(x, ruler.bottom()));
 		p.setPen(QColor("#9A9AA5"));
-		p.drawText(QPointF(x + 3, ruler.bottom() - 5),
-			   QString("%1:%2").arg(int(t) / 60).arg(int(t) % 60, 2, 10, QChar('0')));
+		const int m = int(t + 1e-6) / 60;
+		const double sec = t - m * 60;
+		const QString lbl = step < 1.0 ? QString("%1:%2").arg(m).arg(sec, 4, 'f', step < 0.25 ? 1 : 2, QChar('0'))
+					       : QString("%1:%2").arg(m).arg(int(sec + 1e-6), 2, 10, QChar('0'));
+		p.drawText(QPointF(x + 3, ruler.bottom() - 5), lbl);
 	}
 
 	// ── 비트 선 ───────────────────
@@ -149,7 +205,9 @@ void TimelineWidget::paintEvent(QPaintEvent *)
 	const double total = m_p->totalDuration();
 	p.setPen(QPen(QColor(255, 210, 80, 70), 1));
 	for (double b : beats) {
-		if (b > viewDuration())
+		if (b < m_viewStart)
+			continue;
+		if (b > viewEnd)
 			break;
 		const double x = timeToX(b);
 		p.drawLine(QPointF(x, videoRect().top()), QPointF(x, musicRect().bottom()));
@@ -180,6 +238,9 @@ void TimelineWidget::paintEvent(QPaintEvent *)
 		if (r.width() < 1)
 			continue;
 
+		if (r.right() < 0 || r.left() > width())
+			continue; // 화면 밖
+
 		QColor c = clipColor(s.source);
 		if (m_drag == Drag::Move && i == m_selSeg)
 			c.setAlpha(110);
@@ -187,14 +248,40 @@ void TimelineWidget::paintEvent(QPaintEvent *)
 		p.setBrush(c);
 		p.drawRoundedRect(r, 4, 4);
 
+		// 장면 썸네일: 구간 안을 칸으로 나눠 칸 가운데 시점의 장면을 그림
+		const QString path = m_p->sources.value(s.source).path;
+		if (m_thumbs && !path.isEmpty()) {
+			const QRectF inner = r.adjusted(2, 2, -2, -6);
+			const double tileW = inner.height() * 16.0 / 9.0;
+			p.save();
+			QPainterPath clipPath;
+			clipPath.addRoundedRect(inner, 3, 3);
+			p.setClipPath(clipPath, Qt::IntersectClip);
+			const double x0 = std::max(inner.left(), -tileW);
+			const double firstX = inner.left() + std::floor((x0 - inner.left()) / tileW) * tileW;
+			for (double x = firstX; x < std::min(inner.right(), double(width())); x += tileW) {
+				const double tLocal = xToTime(x + tileW / 2) - st;
+				const double src = s.in + s.outToSrc(std::clamp(tLocal, 0.0, s.outDuration()));
+				const QImage img = m_thumbs->frameAt(path, src);
+				if (!img.isNull())
+					p.drawImage(QRectF(x, inner.top(), tileW, inner.height()), img);
+			}
+			p.fillRect(inner, QColor(0, 0, 0, 60)); // 글자가 잘 보이도록 살짝 어둡게
+			p.restore();
+		}
+
 		QStringList parts;
 		parts << QString("#%1").arg(s.source + 1);
 		if (std::abs(s.speed - 1.0) > 0.01)
 			parts << QString("%1x").arg(s.speed);
 		parts << s.effectNames();
-		p.setPen(Qt::white);
-		p.drawText(r.adjusted(5, 2, -3, 0), Qt::AlignTop | Qt::AlignLeft,
-			   p.fontMetrics().elidedText(parts.join(" · "), Qt::ElideRight, int(r.width()) - 8));
+		const QString segText = p.fontMetrics().elidedText(parts.join(" · "), Qt::ElideRight, int(r.width()) - 8);
+		if (!segText.isEmpty()) {
+			const QRectF tb(r.left() + 3, r.top() + 2, p.fontMetrics().horizontalAdvance(segText) + 6, 15);
+			p.fillRect(tb.intersected(r), QColor(c.red(), c.green(), c.blue(), 220));
+			p.setPen(Qt::white);
+			p.drawText(r.adjusted(5, 2, -3, 0), Qt::AlignTop | Qt::AlignLeft, segText);
+		}
 
 		const QString icon = transitionIcon(s.transIn);
 		if (!icon.isEmpty()) {
@@ -292,7 +379,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent *e)
 	const QPointF pos = e->position();
 	const double t = xToTime(pos.x());
 	m_pressX = m_dragX = pos.x();
-	m_fixedViewDuration = viewDuration();
+	m_fixedViewDuration = fitDuration();
 
 	if (videoRect().contains(pos.toPoint())) {
 		bool isIn = false;

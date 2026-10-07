@@ -20,7 +20,8 @@ public:
 	~ShortsExporter() override;
 
 	bool isRunning() const { return m_proc.state() != QProcess::NotRunning; }
-	void start(const EditProject &project, const QString &output);
+	// previewQuality: 540x960 / 30fps / 빠른 인코딩 (결과 확인용)
+	void start(const EditProject &project, const QString &output, bool previewQuality = false);
 	void cancel();
 
 	static QString ffmpegPath();
@@ -47,6 +48,7 @@ private:
 	int m_bgmInput = -1;
 	QString m_filter;
 	bool m_usingHw = true;
+	bool m_previewQuality = false;
 	bool m_cancelled = false;
 	QByteArray m_errBuf;
 	std::unique_ptr<QTemporaryDir> m_tmp;

@@ -89,6 +89,18 @@ struct MusicTrack {
 	bool fadeOut = true;
 };
 
+// 비트마다 화면이 툭 튀는 효과 (인트로/아웃트로 제외, 영상 구간에만)
+struct BeatFx {
+	bool zoom = false;  // 줌 펄스
+	bool shake = false; // 흔들림
+	int strength = 1;   // 0 = 약하게, 1 = 보통, 2 = 강하게
+	int every = 1;      // 1 = 매 박, 2 = 2박마다, 4 = 마디마다
+	bool enabled() const { return zoom || shake; }
+	double zoomAmount() const { return strength == 0 ? 0.04 : strength == 1 ? 0.08 : 0.14; }
+	double shakeAmount() const { return strength == 0 ? 0.01 : strength == 1 ? 0.02 : 0.035; }
+	static constexpr double kDecay = 0.12; // 펄스가 사라지는 속도(초)
+};
+
 enum class ShortsLayout { CenterCrop = 0, CropWithMinimap = 1, BlurBackground = 2 };
 
 struct EditProject {
@@ -100,6 +112,7 @@ struct EditProject {
 	TitleCard intro;
 	TitleCard outro;
 	MusicTrack music;
+	BeatFx beatFx;
 	double gameVolume = 1.0;
 
 	ShortsLayout layout = ShortsLayout::CenterCrop;
@@ -133,6 +146,11 @@ struct EditProject {
 	QVector<double> beatTimes() const;
 	double nearestBeat(double t) const; // 없으면 -1
 	int snapCutsToBeats();             // 각 구간 끝을 가장 가까운 비트로, 바뀐 컷 수 반환
+
+	// 비트 효과: 펄스 주기/첫 펄스 시각(결과 시간). 꺼져 있거나 BPM이 없으면 false
+	bool beatPulseGrid(double *period, double *first) const;
+	// 시각 t 의 펄스 세기(0~1)와 마지막 펄스 이후 경과 시간
+	double beatPulseAt(double t, double *phase = nullptr) const;
 
 	QJsonObject toJson() const;
 	void fromJson(const QJsonObject &o);

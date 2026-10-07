@@ -309,6 +309,29 @@ int EditProject::snapCutsToBeats()
 	return changed;
 }
 
+bool EditProject::beatPulseGrid(double *period, double *first) const
+{
+	if (!beatFx.enabled() || music.path.isEmpty() || music.bpm <= 0)
+		return false;
+	*period = 60.0 / music.bpm * std::max(1, beatFx.every);
+	double t = music.firstBeat - music.fileOffset;
+	if (t < 0)
+		t += std::ceil(-t / *period) * *period;
+	*first = t;
+	return true;
+}
+
+double EditProject::beatPulseAt(double t, double *phase) const
+{
+	double P, O;
+	if (!beatPulseGrid(&P, &O) || t < O || t < introDuration() || t >= segmentsEnd())
+		return 0.0;
+	const double ph = std::fmod(t - O, P);
+	if (phase)
+		*phase = ph;
+	return std::exp(-ph / BeatFx::kDecay);
+}
+
 // ─── 저장/불러오기 ─────────────────────────────────────
 static QJsonObject cardToJson(const TitleCard &c)
 {
@@ -364,6 +387,8 @@ QJsonObject EditProject::toJson() const
 		{"outro", cardToJson(outro)},
 		{"music", mus},
 		{"gameVolume", gameVolume},
+		{"beatFx", QJsonObject{{"zoom", beatFx.zoom}, {"shake", beatFx.shake},
+				       {"strength", beatFx.strength}, {"every", beatFx.every}}},
 		{"layout", int(layout)},
 		{"minimap", QJsonArray{minimapRect.x(), minimapRect.y(), minimapRect.width(), minimapRect.height()}},
 	};
@@ -431,6 +456,11 @@ void EditProject::fromJson(const QJsonObject &o)
 	music.fadeOut = m.value("fadeOut").toBool(true);
 
 	gameVolume = std::clamp(o.value("gameVolume").toDouble(1.0), 0.0, 2.0);
+	const QJsonObject fx = o.value("beatFx").toObject();
+	beatFx.zoom = fx.value("zoom").toBool();
+	beatFx.shake = fx.value("shake").toBool();
+	beatFx.strength = std::clamp(fx.value("strength").toInt(1), 0, 2);
+	beatFx.every = std::clamp(fx.value("every").toInt(1), 1, 8);
 	layout = ShortsLayout(std::clamp(o.value("layout").toInt(0), 0, 2));
 	const QJsonArray mm = o.value("minimap").toArray();
 	if (mm.size() == 4)

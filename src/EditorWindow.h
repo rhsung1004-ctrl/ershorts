@@ -32,6 +32,7 @@ class QTimer;
 class BeatDetector;
 class ShortsExporter;
 class TimelineWidget;
+class ThumbnailCache;
 
 // 매드무비 편집기
 //  - 여러 클립을 한 타임라인에 이어 붙이고 자르기/순서 바꾸기
@@ -116,7 +117,7 @@ private:
 	void onCardPropsChanged();
 
 	// ── 기타 ──
-	void onExport();
+	void onExport(bool previewQuality);
 	void projectChanged();
 	void updateTimeLabel(double t);
 	void log(const QString &msg);
@@ -178,6 +179,8 @@ private:
 	QPushButton *m_playBtn = nullptr;
 	QLabel *m_timeLabel = nullptr;
 	TimelineWidget *m_timeline = nullptr;
+	ThumbnailCache *m_thumbs = nullptr;
+	QSlider *m_zoomSlider = nullptr;
 
 	// 클립 탭
 	QListWidget *m_clipList = nullptr;
@@ -203,6 +206,10 @@ private:
 	QCheckBox *m_snap = nullptr;
 	QCheckBox *m_musicFade = nullptr;
 	QLabel *m_beatStatus = nullptr;
+	QCheckBox *m_fxBeatZoom = nullptr;
+	QCheckBox *m_fxBeatShake = nullptr;
+	QComboBox *m_fxBeatStrength = nullptr;
+	QComboBox *m_fxBeatEvery = nullptr;
 	QPushButton *m_detectBtn = nullptr;
 
 	// 자막 탭
@@ -232,6 +239,7 @@ private:
 	QComboBox *m_layout = nullptr;
 	QLineEdit *m_outName = nullptr;
 	QPushButton *m_exportBtn = nullptr;
+	QPushButton *m_previewExportBtn = nullptr;
 	QProgressBar *m_progress = nullptr;
 	QPlainTextEdit *m_log = nullptr;
 };

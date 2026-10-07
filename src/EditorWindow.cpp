@@ -2,6 +2,7 @@
 
 #include "BeatDetector.h"
 #include "ShortsExporter.h"
+#include "ThumbnailCache.h"
 #include "TimelineWidget.h"
 
 #include <QAudioOutput>
@@ -12,6 +13,7 @@
 #include <QDesktopServices>
 #include <QDir>
 #include <QDoubleSpinBox>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -121,6 +123,7 @@ EditorWindow::EditorWindow(const QString &projectPath, const QStringList &newCli
 
 	m_exporter = new ShortsExporter(this);
 	m_beats = new BeatDetector(this);
+	m_thumbs = new ThumbnailCache(this);
 
 	m_bgm = new QMediaPlayer(this);
 	m_bgmAudio = new QAudioOutput(this);
@@ -152,7 +155,10 @@ EditorWindow::EditorWindow(const QString &projectPath, const QStringList &newCli
 	connect(m_exporter, &ShortsExporter::logMessage, this, &EditorWindow::log);
 	connect(m_exporter, &ShortsExporter::progress, m_progress, &QProgressBar::setValue);
 	connect(m_exporter, &ShortsExporter::finished, this, [this](bool ok, const QString &path) {
-		m_exportBtn->setText("쇼츠로 내보내기");
+		m_exportBtn->setText("쇼츠로 내보내기 (고화질 1080×1920)");
+		m_previewExportBtn->setText("⚡ 빠른 미리보기 내보내기 (540×960)");
+		m_exportBtn->setEnabled(true);
+		m_previewExportBtn->setEnabled(true);
 		if (ok)
 			QDesktopServices::openUrl(QUrl::fromLocalFile(path));
 		else
@@ -287,7 +293,40 @@ void EditorWindow::buildUi()
 	// ── 아래: 타임라인 ──────────────────
 	m_timeline = new TimelineWidget;
 	m_timeline->setProject(&m_project);
+	m_timeline->setThumbnails(m_thumbs);
 	root->addWidget(m_timeline);
+	connect(m_thumbs, &ThumbnailCache::updated, m_timeline, qOverload<>(&QWidget::update));
+
+	// 타임라인 확대/축소
+	auto *zoomRow = new QHBoxLayout;
+	auto *zoomOut = new QPushButton("－");
+	auto *zoomIn = new QPushButton("＋");
+	auto *zoomFit = new QPushButton("전체 보기");
+	zoomOut->setFixedWidth(32);
+	zoomIn->setFixedWidth(32);
+	m_zoomSlider = new QSlider(Qt::Horizontal);
+	m_zoomSlider->setRange(0, 60); // 배율 = 2^(값/10) → 1배 ~ 64배
+	m_zoomSlider->setMaximumWidth(220);
+	zoomRow->addWidget(new QLabel("타임라인 확대"));
+	zoomRow->addWidget(zoomOut);
+	zoomRow->addWidget(m_zoomSlider);
+	zoomRow->addWidget(zoomIn);
+	zoomRow->addWidget(zoomFit);
+	zoomRow->addWidget(helpLabel("Ctrl+휠: 확대/축소 · 휠: 좌우 이동"));
+	zoomRow->addStretch();
+	root->addLayout(zoomRow);
+	connect(m_zoomSlider, &QSlider::valueChanged, this, [this](int v) {
+		if (!m_syncing)
+			m_timeline->setZoom(std::pow(2.0, v / 10.0));
+	});
+	connect(m_timeline, &TimelineWidget::zoomChanged, this, [this](double z) {
+		m_syncing = true;
+		m_zoomSlider->setValue(int(std::lround(10.0 * std::log2(z))));
+		m_syncing = false;
+	});
+	connect(zoomIn, &QPushButton::clicked, this, [this] { m_timeline->setZoom(m_timeline->zoom() * 1.5); });
+	connect(zoomOut, &QPushButton::clicked, this, [this] { m_timeline->setZoom(m_timeline->zoom() / 1.5); });
+	connect(zoomFit, &QPushButton::clicked, this, [this] { m_timeline->zoomToFit(); });
 
 	connect(m_timeline, &TimelineWidget::seekRequested, this, &EditorWindow::seek);
 	connect(m_timeline, &TimelineWidget::segmentSelected, this, [this](int i) {
@@ -526,6 +565,31 @@ QWidget *EditorWindow::buildMusicTab()
 	bf->addRow(helpLabel("타임라인의 노란 세로선이 비트 위치입니다. 자동 감지가 반 박 어긋나면 "
 			     "'첫 박 위치'를 조금씩 조절하세요."));
 	lay->addWidget(beatBox);
+
+	auto *fxBox = new QGroupBox("비트 효과 (영상 구간에만 적용)");
+	auto *xf = new QFormLayout(fxBox);
+	auto *fxRow = new QHBoxLayout;
+	m_fxBeatZoom = new QCheckBox("줌 펄스");
+	m_fxBeatShake = new QCheckBox("흔들림");
+	fxRow->addWidget(m_fxBeatZoom);
+	fxRow->addWidget(m_fxBeatShake);
+	fxRow->addStretch();
+	xf->addRow("효과", fxRow);
+	m_fxBeatStrength = new QComboBox;
+	m_fxBeatStrength->addItems({"약하게", "보통", "강하게"});
+	xf->addRow("세기", m_fxBeatStrength);
+	m_fxBeatEvery = new QComboBox;
+	m_fxBeatEvery->addItem("매 박", 1);
+	m_fxBeatEvery->addItem("2박마다", 2);
+	m_fxBeatEvery->addItem("4박마다 (1마디)", 4);
+	xf->addRow("간격", m_fxBeatEvery);
+	xf->addRow(helpLabel("비트에 맞춰 화면이 순간적으로 확대되거나 흔들렸다가 0.1초 안에 돌아옵니다. "
+			     "BPM이 설정되어 있어야 하고, 자막은 흔들리지 않아요."));
+	lay->addWidget(fxBox);
+	connect(m_fxBeatZoom, &QCheckBox::toggled, this, &EditorWindow::onMusicPropsChanged);
+	connect(m_fxBeatShake, &QCheckBox::toggled, this, &EditorWindow::onMusicPropsChanged);
+	connect(m_fxBeatStrength, &QComboBox::currentIndexChanged, this, &EditorWindow::onMusicPropsChanged);
+	connect(m_fxBeatEvery, &QComboBox::currentIndexChanged, this, &EditorWindow::onMusicPropsChanged);
 	lay->addStretch();
 
 	connect(pickBtn, &QPushButton::clicked, this, &EditorWindow::chooseMusic);
@@ -693,10 +757,18 @@ QWidget *EditorWindow::buildExportTab()
 	m_outName = new QLineEdit(QFileInfo(m_project.filePath).completeBaseName());
 	form->addRow("파일 이름", m_outName);
 
-	m_exportBtn = new QPushButton("쇼츠로 내보내기");
+	m_previewExportBtn = new QPushButton("⚡ 빠른 미리보기 내보내기 (540×960)");
+	m_previewExportBtn->setMinimumHeight(36);
+	m_previewExportBtn->setToolTip("저화질·30fps로 빠르게 렌더링해서 컷, 자막, 비트 효과를 확인하는 용도");
+	connect(m_previewExportBtn, &QPushButton::clicked, this, [this] { onExport(true); });
+	form->addRow(m_previewExportBtn);
+
+	m_exportBtn = new QPushButton("쇼츠로 내보내기 (고화질 1080×1920)");
 	m_exportBtn->setMinimumHeight(44);
-	connect(m_exportBtn, &QPushButton::clicked, this, &EditorWindow::onExport);
+	connect(m_exportBtn, &QPushButton::clicked, this, [this] { onExport(false); });
 	form->addRow(m_exportBtn);
+	form->addRow(helpLabel("미리보기는 shorts/preview 폴더에 매번 같은 이름으로 덮어써집니다. "
+			       "확인이 끝나면 고화질로 내보내서 업로드하세요."));
 
 	m_progress = new QProgressBar;
 	m_progress->setRange(0, 100);
@@ -772,6 +844,10 @@ void EditorWindow::loadUiFromProject(bool keepPosition)
 	m_bpm->setValue(m.bpm);
 	m_firstBeat->setValue(m.firstBeat);
 	m_beatEvery->setCurrentIndex(std::max(0, m_beatEvery->findData(m.beatEvery)));
+	m_fxBeatZoom->setChecked(m_project.beatFx.zoom);
+	m_fxBeatShake->setChecked(m_project.beatFx.shake);
+	m_fxBeatStrength->setCurrentIndex(m_project.beatFx.strength);
+	m_fxBeatEvery->setCurrentIndex(std::max(0, m_fxBeatEvery->findData(m_project.beatFx.every)));
 
 	auto loadCard = [](CardUi &ui, const TitleCard &c) {
 		ui.enabled->setChecked(c.enabled);
@@ -809,6 +885,7 @@ void EditorWindow::loadUiFromProject(bool keepPosition)
 void EditorWindow::createPlayerFor(int i)
 {
 	// 실행 취소로 클립이 빠졌다가 다시 추가되면 같은 번호의 플레이어를 재사용
+	m_thumbs->request(m_project.sources[i].path);
 	if (i < m_players.size()) {
 		SourcePlayer &sp = m_players[i];
 		sp.path = m_project.sources[i].path;
@@ -913,6 +990,7 @@ void EditorWindow::play()
 	m_clock.start();
 	m_playing = true;
 	m_activeSeg = -1;
+	m_timeline->setFollowPlayhead(true);
 	m_playBtn->setText("⏸ 일시정지");
 	syncPlayers(m_pos, true);
 }
@@ -924,6 +1002,7 @@ void EditorWindow::pause()
 	for (const SourcePlayer &sp : m_players)
 		sp.player->pause();
 	m_bgm->pause();
+	m_timeline->setFollowPlayhead(false);
 	m_playBtn->setText("▶ 재생");
 	syncPlayers(m_pos, false);
 }
@@ -1227,6 +1306,18 @@ void EditorWindow::updateOverlays(double t)
 		m_flashOverlay->setVisible(true);
 	}
 
+	// 비트 효과 (미리보기)
+	double phase = 0.0;
+	const double pulse = m_project.beatPulseAt(t, &phase);
+	if (pulse > 0.001) {
+		if (m_project.beatFx.zoom)
+			scale *= 1.0 + m_project.beatFx.zoomAmount() * pulse;
+		if (m_project.beatFx.shake) {
+			const double a = m_project.beatFx.shakeAmount() * pulse;
+			jitter += QPointF(a * kCanvasW * std::sin(phase * 70), a * kCanvasH * 0.5 * std::cos(phase * 55));
+		}
+	}
+
 	if (seg.source >= 0 && seg.source < m_players.size()) {
 		QGraphicsVideoItem *item = m_players[seg.source].item;
 		item->setScale(scale);
@@ -1423,6 +1514,12 @@ void EditorWindow::onMusicPropsChanged()
 	m.bpm = m_bpm->value();
 	m.firstBeat = m_firstBeat->value();
 	m.beatEvery = m_beatEvery->currentData().toInt();
+	m_project.beatFx.zoom = m_fxBeatZoom->isChecked();
+	m_project.beatFx.shake = m_fxBeatShake->isChecked();
+	m_project.beatFx.strength = m_fxBeatStrength->currentIndex();
+	m_project.beatFx.every = m_fxBeatEvery->currentData().toInt();
+	if (m_project.beatFx.enabled() && m.bpm <= 0)
+		log("비트 효과를 쓰려면 BPM이 필요합니다 (음악 선택 → 자동 감지)");
 	projectChanged();
 	syncPlayers(position(), m_playing);
 }
@@ -1578,27 +1675,39 @@ void EditorWindow::onCardPropsChanged()
 // ═════════════════════════════════════════════════════════════
 // 내보내기 / 기타
 // ═════════════════════════════════════════════════════════════
-void EditorWindow::onExport()
+void EditorWindow::onExport(bool previewQuality)
 {
 	if (m_exporter->isRunning()) {
 		m_exporter->cancel();
 		return;
 	}
-	QDir().mkpath(m_shortsDir);
 	QString base = m_outName->text().trimmed();
 	base.replace(QRegularExpression(R"([\\/:*?"<>|])"), "_");
 	if (base.isEmpty())
 		base = "madmovie";
-	QString out = m_shortsDir + "/" + base + ".mp4";
-	for (int n = 2; QFileInfo::exists(out); ++n)
-		out = m_shortsDir + QString("/%1_%2.mp4").arg(base).arg(n);
+
+	QString out;
+	if (previewQuality) {
+		// 미리보기는 같은 파일을 덮어씀 (재생 중이라 지울 수 없으면 번호를 붙임)
+		const QString dir = m_shortsDir + "/preview";
+		QDir().mkpath(dir);
+		out = dir + "/" + base + "_preview.mp4";
+		for (int n = 2; QFileInfo::exists(out) && !QFile::remove(out); ++n)
+			out = dir + QString("/%1_preview_%2.mp4").arg(base).arg(n);
+	} else {
+		QDir().mkpath(m_shortsDir);
+		out = m_shortsDir + "/" + base + ".mp4";
+		for (int n = 2; QFileInfo::exists(out); ++n)
+			out = m_shortsDir + QString("/%1_%2.mp4").arg(base).arg(n);
+	}
 
 	if (m_playing)
 		pause();
 	m_project.save();
-	m_exportBtn->setText("취소");
+	(previewQuality ? m_previewExportBtn : m_exportBtn)->setText("취소");
+	(previewQuality ? m_exportBtn : m_previewExportBtn)->setEnabled(false);
 	m_tabs->setCurrentIndex(5);
-	m_exporter->start(m_project, out);
+	m_exporter->start(m_project, out, previewQuality);
 }
 
 void EditorWindow::projectChanged()

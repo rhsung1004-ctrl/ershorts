@@ -28,6 +28,7 @@ add_executable(ERShorts WIN32
   src/TimelineWidget.h    src/TimelineWidget.cpp
   src/EditorWindow.h      src/EditorWindow.cpp
   src/BeatDetector.h      src/BeatDetector.cpp
+  src/ThumbnailCache.h    src/ThumbnailCache.cpp
 )
 
 target_link_libraries(ERShorts PRIVATE
