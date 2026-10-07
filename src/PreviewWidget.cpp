@@ -32,7 +32,7 @@ void PreviewWidget::destroyDisplay()
 
 void PreviewWidget::createDisplay()
 {
-	if (m_display || !isVisible())
+	if (m_display || !isVisible() || !m_enabled)
 		return;
 
 	const qreal dpr = devicePixelRatioF();

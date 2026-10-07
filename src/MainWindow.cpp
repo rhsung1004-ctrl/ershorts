@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "Diagnostics.h"
 #include "EditorWindow.h"
 #include "GlobalHotkey.h"
 #include "PreviewWidget.h"
@@ -33,7 +34,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 
-MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
+MainWindow::MainWindow(bool safeMode, QWidget *parent) : QMainWindow(parent), m_safeMode(safeMode)
 {
 	setWindowTitle("ERShorts — 이터널리턴 쇼츠 메이커");
 	resize(1400, 820);
@@ -66,7 +67,9 @@ bool MainWindow::initialize(QString *error)
 
 	refreshClipList();
 
-	if (m_autoStart->isChecked()) {
+	if (m_safeMode) {
+		log("안전 모드: 자동 녹화와 실시간 미리보기를 껐습니다. '버퍼 시작'으로 직접 켤 수 있어요.");
+	} else if (m_autoStart->isChecked()) {
 		QString err;
 		if (!m_core->startReplayBuffer(&err))
 			log(err);
@@ -83,6 +86,7 @@ void MainWindow::buildUi()
 	auto *left = new QWidget;
 	auto *leftLay = new QVBoxLayout(left);
 	m_preview = new PreviewWidget;
+	m_preview->setDisplayEnabled(!m_safeMode);
 	auto *guide = new QCheckBox("9:16 크롭 영역 표시");
 	guide->setChecked(true);
 	connect(guide, &QCheckBox::toggled, this, [this](bool v) { m_preview->setCropGuideVisible(v); });
@@ -148,10 +152,15 @@ void MainWindow::buildUi()
 	auto *refreshBtn = new QPushButton("새로고침");
 	auto *openDirBtn = new QPushButton("클립 폴더");
 	auto *openShortsBtn = new QPushButton("쇼츠 폴더");
+	auto *openLogsBtn = new QPushButton("로그 폴더");
+	openLogsBtn->setToolTip("문제가 생겼을 때 이 폴더의 최신 로그 파일을 보내주세요");
+	connect(openLogsBtn, &QPushButton::clicked, this,
+		[] { QDesktopServices::openUrl(QUrl::fromLocalFile(Diagnostics::logDir())); });
 	clipBtns->addWidget(playBtn);
 	clipBtns->addWidget(refreshBtn);
 	clipBtns->addWidget(openDirBtn);
 	clipBtns->addWidget(openShortsBtn);
+	clipBtns->addWidget(openLogsBtn);
 	clipLay->addWidget(m_clips);
 	clipLay->addWidget(editBtn);
 	clipLay->addWidget(openProjBtn);
@@ -310,6 +319,7 @@ void MainWindow::openProject()
 
 void MainWindow::log(const QString &msg)
 {
+	Diagnostics::write("[앱] " + msg);
 	m_log->appendPlainText(QDateTime::currentDateTime().toString("[hh:mm:ss] ") + msg);
 }
 

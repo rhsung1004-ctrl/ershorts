@@ -29,10 +29,11 @@ add_executable(ERShorts WIN32
   src/EditorWindow.h      src/EditorWindow.cpp
   src/BeatDetector.h      src/BeatDetector.cpp
   src/ThumbnailCache.h    src/ThumbnailCache.cpp
+  src/Diagnostics.h       src/Diagnostics.cpp
 )
 
 target_link_libraries(ERShorts PRIVATE
-  Qt6::Widgets Qt6::Multimedia Qt6::MultimediaWidgets OBS::libobs user32)
+  Qt6::Widgets Qt6::Multimedia Qt6::MultimediaWidgets OBS::libobs user32 dbghelp)
 
 if(MSVC)
   target_compile_options(ERShorts PRIVATE /utf-8 /W3)

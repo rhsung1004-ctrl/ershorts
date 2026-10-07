@@ -20,7 +20,7 @@ class PreviewWidget;
 class MainWindow : public QMainWindow {
 	Q_OBJECT
 public:
-	explicit MainWindow(QWidget *parent = nullptr);
+	explicit MainWindow(bool safeMode = false, QWidget *parent = nullptr);
 	~MainWindow() override;
 
 	bool initialize(QString *error);
@@ -68,4 +68,5 @@ private:
 
 	QPlainTextEdit *m_log = nullptr;
 	QString m_outputDir;
+	bool m_safeMode = false;
 };

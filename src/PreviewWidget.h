@@ -11,6 +11,7 @@ public:
 	~PreviewWidget() override;
 
 	void destroyDisplay();
+	void setDisplayEnabled(bool on) { m_enabled = on; }
 	void setCropGuideVisible(bool v) { m_showGuide = v; }
 
 	QPaintEngine *paintEngine() const override { return nullptr; }
@@ -26,4 +27,5 @@ private:
 
 	obs_display_t *m_display = nullptr;
 	bool m_showGuide = true;
+	bool m_enabled = true;
 };
