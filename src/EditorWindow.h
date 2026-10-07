@@ -104,6 +104,12 @@ private:
 	void splitSelectedOnBeats();
 	void deleteSelectedSegment();
 	void duplicateSelectedSegment();
+
+	// ── 잘라내기 / 복사 / 붙여넣기 (구간 또는 자막, 마지막으로 선택한 쪽) ──
+	enum class SelKind { None, Segment, Subtitle };
+	bool copySelection();
+	void cutSelection();
+	void pasteClipboard();
 	void moveSelected(int delta);
 	void selectSegment(int i);
 	void onSegmentPropsChanged();
@@ -237,6 +243,11 @@ private:
 	QCheckBox *m_subBox = nullptr;
 	QComboBox *m_subFont = nullptr;
 	QVector<QComboBox *> m_fontCombos;
+
+	SelKind m_lastSel = SelKind::None;
+	SelKind m_clipKind = SelKind::None;
+	Segment m_clipSegment;
+	Subtitle m_clipSubtitle;
 	QColor m_subColorValue = Qt::white;
 
 	// 인트로/아웃트로 탭

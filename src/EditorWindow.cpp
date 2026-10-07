@@ -367,7 +367,7 @@ void EditorWindow::buildUi()
 	});
 
 	root->addWidget(helpLabel(
-		"Space 재생/정지 · S 자르기 · B 선택 구간을 비트마다 자르기 · Delete 구간 삭제 · Ctrl+D 복제 · "
+		"Space 재생/정지 · S 자르기 · B 선택 구간을 비트마다 자르기 · Delete 구간 삭제 · Ctrl+X/C/V 잘라내기·복사·붙여넣기 · Ctrl+D 복제 · "
 		"T 자막 추가 · Ctrl+Z 실행 취소 · ←/→ 1초 · ,/. 0.1초 · 선택한 구간을 다시 잡고 끌면 순서 변경"));
 }
 
@@ -447,6 +447,21 @@ QWidget *EditorWindow::buildSegmentTab()
 	grid->addWidget(dupBtn, 1, 1);
 	grid->addWidget(leftBtn, 2, 0);
 	grid->addWidget(rightBtn, 2, 1);
+	auto *cutBtn = new QPushButton("잘라내기 (Ctrl+X)");
+	auto *copyBtn = new QPushButton("복사 (Ctrl+C)");
+	auto *pasteBtn = new QPushButton("붙여넣기 (Ctrl+V)");
+	grid->addWidget(cutBtn, 3, 0);
+	grid->addWidget(copyBtn, 3, 1);
+	grid->addWidget(pasteBtn, 4, 0, 1, 2);
+	connect(cutBtn, &QPushButton::clicked, this, [this] {
+		m_lastSel = SelKind::Segment;
+		cutSelection();
+	});
+	connect(copyBtn, &QPushButton::clicked, this, [this] {
+		m_lastSel = SelKind::Segment;
+		copySelection();
+	});
+	connect(pasteBtn, &QPushButton::clicked, this, &EditorWindow::pasteClipboard);
 	lay->addLayout(grid);
 	connect(splitBtn, &QPushButton::clicked, this, &EditorWindow::splitAtPlayhead);
 	connect(beatSplitBtn, &QPushButton::clicked, this, &EditorWindow::splitSelectedOnBeats);
@@ -1037,6 +1052,10 @@ void EditorWindow::setupShortcuts()
 	add(QKeySequence(Qt::Key_B), [this] { splitSelectedOnBeats(); });
 	add(QKeySequence(Qt::Key_Delete), [this] { deleteSelectedSegment(); });
 	add(QKeySequence(Qt::CTRL | Qt::Key_D), [this] { duplicateSelectedSegment(); });
+	// 글자 입력칸에 커서가 있으면 이 단축키 대신 글자 잘라내기/복사/붙여넣기가 동작함
+	add(QKeySequence(Qt::CTRL | Qt::Key_X), [this] { cutSelection(); });
+	add(QKeySequence(Qt::CTRL | Qt::Key_C), [this] { copySelection(); });
+	add(QKeySequence(Qt::CTRL | Qt::Key_V), [this] { pasteClipboard(); });
 	add(QKeySequence(Qt::Key_T), [this] { addSubtitle(); });
 	add(QKeySequence(Qt::Key_Left), [this] { seek(position() - 1.0); });
 	add(QKeySequence(Qt::Key_Right), [this] { seek(position() + 1.0); });
@@ -1699,6 +1718,93 @@ void EditorWindow::duplicateSelectedSegment()
 	projectChanged();
 }
 
+// 잘라내기 / 복사 / 붙여넣기
+//  - 대상: 마지막으로 선택한 것 (타임라인 구간 또는 자막)
+//  - 붙여넣기: 구간은 재생 위치에 끼워 넣고(구간 중간이면 그 자리에서 나눔), 자막은 재생 위치에서 시작
+bool EditorWindow::copySelection()
+{
+	if (m_lastSel == SelKind::Subtitle) {
+		const int i = m_subList->currentRow();
+		if (i >= 0 && i < m_project.subtitles.size()) {
+			m_clipSubtitle = m_project.subtitles[i];
+			m_clipKind = SelKind::Subtitle;
+			log("자막 복사: " + m_clipSubtitle.text.simplified());
+			return true;
+		}
+	} else {
+		const int i = m_timeline->selectedSegment();
+		if (i >= 0 && i < m_project.segments.size()) {
+			m_clipSegment = m_project.segments[i];
+			m_clipKind = SelKind::Segment;
+			log(QString("구간 복사 (%1초)").arg(m_clipSegment.outDuration(), 0, 'f', 2));
+			return true;
+		}
+	}
+	log("복사할 구간이나 자막을 먼저 선택하세요");
+	return false;
+}
+
+void EditorWindow::cutSelection()
+{
+	const SelKind kind = m_lastSel;
+	if (!copySelection())
+		return;
+	if (kind == SelKind::Subtitle)
+		deleteSelectedSubtitle();
+	else
+		deleteSelectedSegment();
+	log(kind == SelKind::Subtitle ? "자막 잘라냄 (Ctrl+V로 붙여넣기)" : "구간 잘라냄 (Ctrl+V로 붙여넣기)");
+}
+
+void EditorWindow::pasteClipboard()
+{
+	const double t = position();
+
+	if (m_clipKind == SelKind::Subtitle) {
+		Subtitle s = m_clipSubtitle;
+		const double total = m_project.totalDuration();
+		const double len = std::max(0.3, s.end - s.start);
+		s.start = std::min(t, std::max(0.0, total - 0.3));
+		s.end = std::min(s.start + len, std::max(s.start + 0.3, total));
+		m_project.subtitles.push_back(s);
+		refreshSubtitleList();
+		rebuildSubtitleVisuals();
+		selectSubtitle(int(m_project.subtitles.size()) - 1);
+		m_tabs->setCurrentIndex(3);
+		projectChanged();
+		log("자막 붙여넣기");
+		return;
+	}
+
+	if (m_clipKind == SelKind::Segment) {
+		if (m_clipSegment.source < 0 || m_clipSegment.source >= m_project.sources.size()) {
+			log("붙여넣을 구간의 클립이 프로젝트에 없습니다");
+			return;
+		}
+		// 넣을 위치: 재생 위치가 구간 중간이면 그 자리에서 나눠서 사이에, 아니면 가까운 경계에
+		int at = int(m_project.segments.size());
+		const auto loc = m_project.locate(t);
+		if (loc.kind == EditProject::Locate::Intro) {
+			at = 0;
+		} else if (loc.kind == EditProject::Locate::Segment) {
+			if (m_project.splitAt(t)) {
+				at = loc.seg + 1;
+			} else {
+				const Segment &cur = m_project.segments[loc.seg];
+				at = (loc.srcTime - cur.in < cur.out - loc.srcTime) ? loc.seg : loc.seg + 1;
+			}
+		}
+		m_project.segments.insert(at, m_clipSegment);
+		selectSegment(at);
+		projectChanged();
+		seek(m_project.segmentStart(at));
+		log("구간 붙여넣기");
+		return;
+	}
+
+	log("붙여넣을 내용이 없습니다 (먼저 Ctrl+X 또는 Ctrl+C)");
+}
+
 void EditorWindow::moveSelected(int delta)
 {
 	const int i = m_timeline->selectedSegment();
@@ -1715,6 +1821,8 @@ void EditorWindow::selectSegment(int i)
 {
 	if (i >= m_project.segments.size())
 		i = -1;
+	if (i >= 0)
+		m_lastSel = SelKind::Segment;
 	m_timeline->setSelectedSegment(i);
 	m_segProps->setEnabled(i >= 0);
 	if (i < 0) {
@@ -1895,6 +2003,8 @@ void EditorWindow::selectSubtitle(int i)
 {
 	if (i >= m_project.subtitles.size())
 		i = -1;
+	if (i >= 0)
+		m_lastSel = SelKind::Subtitle;
 	m_timeline->setSelectedSubtitle(i);
 	m_subProps->setEnabled(i >= 0);
 
