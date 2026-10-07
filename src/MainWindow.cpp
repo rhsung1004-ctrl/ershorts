@@ -193,6 +193,23 @@ void MainWindow::buildUi()
 	clipBtns->addWidget(openDirBtn);
 	clipBtns->addWidget(openShortsBtn);
 	clipBtns->addWidget(openLogsBtn);
+	auto *aboutBtn = new QPushButton("정보");
+	clipBtns->addWidget(aboutBtn);
+	connect(aboutBtn, &QPushButton::clicked, this, [this] {
+		QMessageBox::about(
+			this, "ERShorts 정보",
+			"<h3>ERShorts — 이터널리턴 쇼츠 메이커</h3>"
+			"<p>Copyright © 2026 rhsung1004-ctrl<br>"
+			"이 프로그램은 <b>GNU GPL v3</b>(또는 이후 버전)로 배포되는 자유 소프트웨어입니다. "
+			"누구나 사용·수정·재배포할 수 있으며, 어떠한 보증도 제공하지 않습니다.</p>"
+			"<p>소스 코드: <a href='https://github.com/rhsung1004-ctrl/ershorts'>"
+			"github.com/rhsung1004-ctrl/ershorts</a></p>"
+			"<p>포함된 구성요소: OBS Studio/libobs (GPL-2.0+), Qt 6 (LGPL-3.0), FFmpeg (GPL-3.0), "
+			"Visual C++ 런타임 — 자세한 내용은 프로그램 폴더의 THIRD_PARTY_NOTICES.txt 참고</p>"
+			"<p><small>ERShorts는 이터널리턴(Eternal Return), 님블뉴런(Nimble Neuron), OBS Project와 관련 없는 "
+			"비공식 팬 제작 도구입니다. 화면만 캡처하며 게임 파일이나 메모리는 건드리지 않고, "
+			"어떤 정보도 외부로 보내지 않습니다.</small></p>");
+	});
 	clipLay->addWidget(m_clips);
 	clipLay->addWidget(editBtn);
 	clipLay->addWidget(openProjBtn);

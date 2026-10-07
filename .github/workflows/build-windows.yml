@@ -147,6 +147,10 @@ jobs:
 
           # (6) 안내 파일
           Copy-Item "app/README.md" "$dist/README.md"
+          # 라이선스 / 제3자 고지 (GPL 배포 조건)
+          Copy-Item "app/LICENSE" "$dist/LICENSE.txt"
+          Copy-Item "app/THIRD_PARTY_NOTICES.txt" "$dist/THIRD_PARTY_NOTICES.txt"
+          Copy-Item "app/licenses" "$dist/licenses" -Recurse
           @"
           ERShorts 실행 방법
           ==================
@@ -155,6 +159,15 @@ jobs:
           3. 처음 실행할 때 Windows가 '알 수 없는 게시자' 경고를 띄우면
           '추가 정보' → '실행' 을 누르세요 (코드 서명이 없는 개인 빌드라서 나오는 경고입니다).
           4. 클립: 동영상\ERShorts\clips   결과: 동영상\ERShorts\shorts
+
+          안내
+          ----
+          - ERShorts는 이터널리턴 및 님블뉴런과 관련 없는 비공식 팬 제작 도구입니다.
+          - 화면만 캡처하며 게임 파일이나 메모리는 건드리지 않습니다. 게임 약관 준수는 사용자 책임입니다.
+          - 어떤 정보도 외부로 보내지 않습니다. 녹화/로그는 내 PC에만 저장됩니다.
+          - 보증 없이 "있는 그대로" 제공됩니다.
+          - 라이선스: GNU GPL v3 (LICENSE.txt), 포함 구성요소 고지: THIRD_PARTY_NOTICES.txt
+          - 소스 코드: https://github.com/rhsung1004-ctrl/ershorts
           "@ | Out-File "$dist/실행방법.txt" -Encoding utf8
 
           Get-ChildItem $dist | Format-Table Name, Length
@@ -170,7 +183,8 @@ jobs:
             'obs-plugins/64bit/win-capture.dll', 'obs-plugins/64bit/win-wasapi.dll', 'obs-plugins/64bit/obs-ffmpeg.dll',
             'obs-plugins/64bit/obs-x264.dll', 'obs-plugins/64bit/obs-nvenc.dll', 'obs-plugins/64bit/obs-outputs.dll',
             'data/libobs/default.effect', 'data/obs-plugins/win-capture/graphics-hook64.dll',
-            'data/obs-plugins/win-capture/inject-helper64.exe', 'data/obs-plugins/win-capture/get-graphics-offsets64.exe'
+            'data/obs-plugins/win-capture/inject-helper64.exe', 'data/obs-plugins/win-capture/get-graphics-offsets64.exe',
+            'LICENSE.txt', 'THIRD_PARTY_NOTICES.txt', 'licenses/GPL-2.0.txt', 'licenses/GPL-3.0.txt', 'licenses/LGPL-3.0.txt'
           )
           $missing = $required | Where-Object { -not (Test-Path (Join-Path $dist $_)) }
           $mm = (Get-ChildItem "$dist/bin/64bit/multimedia" -ErrorAction SilentlyContinue | ForEach-Object Name) -join ', '

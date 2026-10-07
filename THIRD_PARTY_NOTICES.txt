@@ -1,0 +1,82 @@
+ERShorts — 라이선스 및 제3자 구성요소 고지 / License & Third-Party Notices
+===========================================================================
+
+ERShorts
+--------
+Copyright (C) 2026 rhsung1004-ctrl
+
+이 프로그램은 자유 소프트웨어입니다. GNU 일반 공중 사용 허가서(GPL) 버전 3
+또는 (선택에 따라) 그 이후 버전의 조건에 따라 재배포하거나 수정할 수 있습니다.
+이 프로그램은 유용하게 쓰이기를 바라며 배포되지만, 상품성이나 특정 목적 적합성에
+대한 묵시적 보증을 포함한 어떠한 보증도 하지 않습니다. 자세한 내용은 LICENSE 파일
+(GNU GPL v3 전문)을 참고하세요.
+
+This program is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software Foundation,
+either version 3 of the License, or (at your option) any later version.
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the LICENSE file for details.
+
+소스 코드 / Source code:
+  https://github.com/rhsung1004-ctrl/ershorts
+
+
+비공식 프로그램 안내 / Unofficial tool
+--------------------------------------
+ERShorts는 개인이 만든 비공식 팬 제작 도구이며, 이터널리턴(Eternal Return) 및
+개발사 님블뉴런(Nimble Neuron)과 아무 관련이 없고 그들의 승인이나 후원을 받지
+않았습니다. 게임 이름은 이 프로그램이 어떤 게임용인지 설명하기 위해서만 사용합니다.
+"OBS"는 OBS Project의 상표이며, ERShorts는 OBS Project와도 관련이 없습니다.
+
+ERShorts is an unofficial fan-made tool. It is not affiliated with, endorsed by, or
+sponsored by Eternal Return or Nimble Neuron, nor by the OBS Project.
+
+
+이 배포본에 포함된 제3자 구성요소 / Third-party components in this package
+----------------------------------------------------------------------------
+
+1) OBS Studio (libobs 및 플러그인: win-capture, win-wasapi, obs-ffmpeg, obs-x264,
+   obs-nvenc, obs-qsv11, obs-outputs 등) — 버전 32.2.2
+   License: GNU GPL v2.0 or later  (licenses/GPL-2.0.txt)
+   Copyright (C) OBS Project and contributors
+   Source: https://github.com/obsproject/obs-studio  (tag 32.2.2)
+   OBS 런타임에는 OBS 의존성 패키지(obs-deps)의 라이브러리가 함께 들어 있습니다
+   (FFmpeg 라이브러리, x264, librist, srt, mbedTLS, zlib, libcurl, jansson 등).
+   각 구성요소의 라이선스와 소스는 아래에서 확인할 수 있습니다.
+   https://github.com/obsproject/obs-deps
+
+2) Qt 6 (Qt Core, Gui, Widgets, Multimedia, MultimediaWidgets 등) — 버전 6.8.3
+   License: GNU LGPL v3.0  (licenses/LGPL-3.0.txt)
+   Copyright (C) The Qt Company Ltd. and other contributors
+   Source: https://download.qt.io/official_releases/qt/6.8/
+   Qt는 동적 라이브러리(Qt6*.dll)로 연결되어 있으며, 사용자는 호환되는 Qt 6.8
+   DLL로 교체해 사용할 수 있습니다.
+   Qt is dynamically linked (Qt6*.dll). You may replace these DLLs with your own
+   compatible build of Qt 6.8.
+
+3) FFmpeg (ffmpeg.exe, 쇼츠 내보내기/BPM 분석/썸네일용 별도 프로그램)
+   빌드: BtbN/FFmpeg-Builds "ffmpeg-master-latest-win64-gpl"
+   License: GNU GPL v3.0  (licenses/GPL-3.0.txt) — x264, x265 등 GPL 구성요소 포함
+   Source: https://ffmpeg.org/download.html
+           https://github.com/BtbN/FFmpeg-Builds  (빌드 스크립트 및 구성요소 소스 안내)
+   ERShorts는 ffmpeg.exe를 별도 프로세스로 실행합니다.
+
+4) Microsoft Visual C++ 재배포 가능 런타임 (vcruntime140*.dll, msvcp140*.dll 등)
+   Microsoft Visual C++ Redistributable 라이선스에 따라 재배포됩니다.
+   Copyright (C) Microsoft Corporation
+
+글꼴 / Fonts
+------------
+이 배포본에는 글꼴 파일이 들어 있지 않습니다. 기본 글꼴(맑은 고딕)은 Windows에
+설치된 것을 사용하며, 사용자가 추가한 글꼴의 사용 조건은 각 글꼴 제작자의
+라이선스를 따릅니다.
+No font files are distributed. The default font (Malgun Gothic) is used from the
+user's Windows installation. Fonts added by users are subject to their own licenses.
+
+
+GPL 소스 제공 / Corresponding source
+-----------------------------------
+GPL에 따라, 이 배포본을 만든 ERShorts의 전체 소스 코드와 빌드 방법(.github/workflows/
+build-windows.yml)은 위 저장소에 공개되어 있습니다. 포함된 제3자 구성요소의 소스는
+각 항목에 적힌 주소에서 받을 수 있습니다.
