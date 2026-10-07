@@ -38,6 +38,8 @@ target_link_libraries(ERShorts PRIVATE
 if(MSVC)
   target_compile_options(ERShorts PRIVATE /utf-8 /W3)
 endif()
+# Windows.h 의 min/max 매크로가 std::min/std::max 를 망가뜨리지 않도록
+target_compile_definitions(ERShorts PRIVATE NOMINMAX)
 
 # 실행 파일을 OBS와 같은 폴더 구조(bin/64bit)에 두면
 # libobs가 플러그인(../../obs-plugins/64bit)과 데이터(../../data)를 기본 경로에서 찾습니다.
