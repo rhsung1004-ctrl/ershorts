@@ -232,7 +232,32 @@ jobs:
           path: ERShorts-windows-x64.zip
           retention-days: 30
 
-      - name: 릴리스에 업로드 (v 태그일 때)
+      # main 브랜치에 올라온 빌드는 Releases 에 자동 게시 (로그인 없이 누구나 다운로드 가능)
+      # 항상 최신 버전 링크: https://github.com/<저장소>/releases/latest/download/ERShorts-windows-x64.zip
+      - name: 릴리스에 자동 게시
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.${{ github.run_number }}
+          name: ERShorts v0.1.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          files: ERShorts-windows-x64.zip
+          body: |
+            ## 다운로드
+            아래 **ERShorts-windows-x64.zip** 을 받아 압축을 풀고, 맨 위의 **ERShorts.exe** 를 실행하세요.
+            처음 실행할 때 "Windows의 PC 보호" 경고가 뜨면 **추가 정보 → 실행** 을 누르세요 (코드 서명이 없는 개인 빌드).
+
+            ## 이번 변경
+            ${{ github.event.head_commit.message }}
+
+            ## 안내
+            - 이터널리턴 및 님블뉴런과 관련 없는 **비공식 팬 제작 도구**입니다.
+            - 화면만 캡처하며 게임 파일이나 메모리는 건드리지 않습니다. 게임 약관 준수는 사용자 책임입니다.
+            - 어떤 정보도 외부로 보내지 않습니다. 보증 없이 "있는 그대로" 제공됩니다.
+            - 라이선스: GNU GPL v3 · 포함 구성요소: THIRD_PARTY_NOTICES.txt
+
+      - name: 태그 버전 릴리스 (v 태그를 직접 올렸을 때)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:

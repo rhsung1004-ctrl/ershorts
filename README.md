@@ -1,5 +1,8 @@
 # ERShorts — 이터널리턴 쇼츠 메이커 (libobs 내장)
 
+**⬇ 다운로드 (Windows, 로그인 불필요):** [최신 버전 ERShorts-windows-x64.zip](https://github.com/rhsung1004-ctrl/ershorts/releases/latest/download/ERShorts-windows-x64.zip)
+· [모든 버전 보기](https://github.com/rhsung1004-ctrl/ershorts/releases)
+
 게임하면서 F9 한 번 → 최근 N초 클립 저장 → 9:16 쇼츠로 바로 내보내기까지 하나의 프로그램에서 처리합니다.
 
 ## 기능
