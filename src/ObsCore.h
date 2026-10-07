@@ -26,6 +26,7 @@ public:
 		int maxBufferMB = 1500;
 		QString outputDir;         // 클립 저장 폴더
 		bool captureMic = false;
+		bool gameAudioOnly = true; // 창 캡처일 때 게임 프로그램 소리만 녹음 (알림음·디스코드 등 제외)
 	};
 
 	explicit ObsCore(QObject *parent = nullptr);

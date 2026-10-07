@@ -132,6 +132,8 @@ void ObsCore::rebuildCaptureSource()
 		obs_data_set_int(s, "priority", 2); // 실행 파일 이름으로 창을 다시 찾음 (창 제목이 바뀌어도 OK)
 		obs_data_set_bool(s, "cursor", false);
 		obs_data_set_bool(s, "client_area", true);
+		// 게임 창의 소리만 따로 녹음 (Windows 10 2004 이상). 이때는 데스크톱 소리를 녹음하지 않음
+		obs_data_set_bool(s, "capture_audio", m_settings.gameAudioOnly);
 		if (target.isEmpty())
 			emit logMessage("이터널리턴 창을 아직 찾지 못했어요. 게임을 켜면 자동으로 연결됩니다.");
 		else
@@ -238,9 +240,15 @@ void ObsCore::rebuildAudioSources()
 	obs_data_t *s = obs_data_create();
 	obs_data_set_string(s, "device_id", "default");
 
-	m_desktopAudio = obs_source_create("wasapi_output_capture", "Desktop Audio", s, nullptr);
-	if (m_desktopAudio)
-		obs_set_output_source(kChannelDesktop, m_desktopAudio);
+	const bool appAudio = m_settings.gameAudioOnly && m_settings.captureMode == CaptureMode::Window;
+	if (appAudio) {
+		emit logMessage("소리: 게임 소리만 녹음 (Windows 알림음, 디스코드 등은 녹음 안 됨)");
+	} else {
+		m_desktopAudio = obs_source_create("wasapi_output_capture", "Desktop Audio", s, nullptr);
+		if (m_desktopAudio)
+			obs_set_output_source(kChannelDesktop, m_desktopAudio);
+		emit logMessage("소리: 컴퓨터 전체 소리 녹음");
+	}
 
 	if (m_settings.captureMic) {
 		m_micAudio = obs_source_create("wasapi_input_capture", "Mic", s, nullptr);

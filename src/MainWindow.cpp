@@ -69,10 +69,13 @@ bool MainWindow::initialize(QString *error)
 	// 캡처 방식/창을 바꾸면 바로 적용
 	connect(m_captureMode, &QComboBox::currentIndexChanged, this, [this] {
 		m_gameWindow->setEnabled(m_captureMode->currentData().toInt() != int(ObsCore::CaptureMode::Monitor));
+		m_gameAudioOnly->setEnabled(m_captureMode->currentData().toInt() == int(ObsCore::CaptureMode::Window));
 		onApplySettings();
 	});
 	connect(m_gameWindow, &QComboBox::activated, this, [this] { onApplySettings(); });
+	connect(m_gameAudioOnly, &QCheckBox::toggled, this, [this] { onApplySettings(); });
 	m_gameWindow->setEnabled(m_captureMode->currentData().toInt() != int(ObsCore::CaptureMode::Monitor));
+	m_gameAudioOnly->setEnabled(m_captureMode->currentData().toInt() == int(ObsCore::CaptureMode::Window));
 
 	// 게임을 프로그램보다 늦게 켜도 창 캡처가 자동으로 연결되도록 3초마다 확인
 	auto *retarget = new QTimer(this);
@@ -148,6 +151,11 @@ void MainWindow::buildUi()
 	m_bufferSec->setRange(10, 300);
 	m_bufferSec->setSuffix(" 초");
 	m_mic = new QCheckBox("마이크 녹음");
+	m_gameAudioOnly = new QCheckBox("게임 소리만 녹음 (알림음·디스코드 제외)");
+	m_gameAudioOnly->setToolTip("창 캡처일 때 이터널리턴 프로그램의 소리만 녹음합니다.\n"
+				    "끄면 컴퓨터에서 나는 모든 소리를 녹음합니다.");
+	m_saveSound = new QCheckBox("클립 저장 시 알림음");
+	m_saveSound->setToolTip("'게임 소리만 녹음'을 끈 상태에서 켜면 알림음이 다음 클립에 녹음될 수 있어요");
 	m_autoStart = new QCheckBox("실행 시 자동 시작");
 	auto *applyBtn = new QPushButton("설정 적용");
 	m_toggleBtn = new QPushButton("버퍼 시작");
@@ -159,6 +167,8 @@ void MainWindow::buildUi()
 	recForm->addRow("게임 창", winRow);
 	recForm->addRow("버퍼 길이", m_bufferSec);
 	recForm->addRow(m_mic);
+	recForm->addRow(m_gameAudioOnly);
+	recForm->addRow(m_saveSound);
 	recForm->addRow(m_autoStart);
 	auto *btnRow = new QHBoxLayout;
 	btnRow->addWidget(applyBtn);
@@ -245,6 +255,8 @@ void MainWindow::loadSettings()
 	m_gameWindow->setProperty("saved", s.value("gameWindow2").toString());
 	m_bufferSec->setValue(s.value("bufferSec", 45).toInt());
 	m_mic->setChecked(s.value("mic", false).toBool());
+	m_gameAudioOnly->setChecked(s.value("gameAudioOnly", true).toBool());
+	m_saveSound->setChecked(s.value("saveSound", false).toBool());
 	m_autoStart->setChecked(s.value("autoStart", true).toBool());
 	m_outputDir = s.value("outputDir",
 			      QStandardPaths::writableLocation(QStandardPaths::MoviesLocation) + "/ERShorts")
@@ -258,6 +270,8 @@ void MainWindow::saveSettings()
 	s.setValue("gameWindow2", m_gameWindow->currentData().toString());
 	s.setValue("bufferSec", m_bufferSec->value());
 	s.setValue("mic", m_mic->isChecked());
+	s.setValue("gameAudioOnly", m_gameAudioOnly->isChecked());
+	s.setValue("saveSound", m_saveSound->isChecked());
 	s.setValue("autoStart", m_autoStart->isChecked());
 	s.setValue("outputDir", m_outputDir);
 }
@@ -269,6 +283,7 @@ ObsCore::Settings MainWindow::currentSettings() const
 	st.gameWindow = m_gameWindow->currentData().toString();
 	st.bufferSeconds = m_bufferSec->value();
 	st.captureMic = m_mic->isChecked();
+	st.gameAudioOnly = m_gameAudioOnly->isChecked();
 	st.outputDir = clipDir();
 	return st;
 }
@@ -302,14 +317,19 @@ void MainWindow::onSaveClip()
 {
 	if (!m_core->saveReplay()) {
 		log("버퍼가 꺼져 있어 저장할 수 없습니다");
-		MessageBeep(MB_ICONHAND);
+		if (m_saveSound->isChecked())
+			MessageBeep(MB_ICONHAND);
 	}
 }
 
 void MainWindow::onClipSaved(const QString &path)
 {
-	MessageBeep(MB_OK); // 게임 중에도 저장됐는지 소리로 확인
+	if (m_saveSound->isChecked())
+		MessageBeep(MB_OK); // (선택) 게임 중에도 저장됐는지 소리로 확인
 	log("클립 저장됨: " + QFileInfo(path).fileName());
+	// 소리 대신 화면으로 알림: 상태 표시를 3초간 '저장됨'으로
+	m_status->setText("<b style='color:#30a46c'>✔ 클립 저장됨</b>");
+	QTimer::singleShot(3000, this, [this] { onReplayStateChanged(m_core->isReplayActive()); });
 	refreshClipList();
 	if (m_clips->count() > 0)
 		m_clips->setCurrentRow(0);

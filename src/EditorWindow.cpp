@@ -1589,7 +1589,11 @@ void EditorWindow::updateOverlays(double t)
 	double scale = seg.zoom ? 1.3 : 1.0;
 	QPointF jitter;
 
-	switch (seg.transIn) {
+	// 영상 맨 처음(인트로 없음)은 흰 플래시 대신 검은 화면에서 서서히 (내보내기와 같게)
+	const bool opening = (loc.seg == 0 && !m_project.intro.enabled);
+	const Transition trans = (opening && seg.transIn == Transition::Flash) ? Transition::BlackDip : seg.transIn;
+	const double dipLen = opening ? 0.4 : 0.15;
+	switch (trans) {
 	case Transition::Flash:
 		if (local < 0.25) {
 			m_flashOverlay->setBrush(Qt::white);
@@ -1598,9 +1602,9 @@ void EditorWindow::updateOverlays(double t)
 		}
 		break;
 	case Transition::BlackDip:
-		if (local < 0.15) {
+		if (local < dipLen) {
 			m_flashOverlay->setBrush(Qt::black);
-			m_flashOverlay->setOpacity(1.0 - local / 0.15);
+			m_flashOverlay->setOpacity(1.0 - local / dipLen);
 			m_flashOverlay->setVisible(true);
 		}
 		break;

@@ -217,12 +217,16 @@ QString ShortsExporter::buildFilter()
 		if (s.vignette)
 			v += ",vignette=PI/4";
 
-		switch (s.transIn) {
+		// 영상 맨 처음(인트로 없음)은 흰 플래시 대신 검은 화면에서 서서히 밝아지게
+		const bool opening = (i == 0 && !p.intro.enabled);
+		const Transition trans = (opening && s.transIn == Transition::Flash) ? Transition::BlackDip : s.transIn;
+		const double dipLen = opening ? 0.4 : kDip;
+		switch (trans) {
 		case Transition::Flash:
 			v += ",fade=t=in:st=0:d=0.25:color=white";
 			break;
 		case Transition::BlackDip:
-			v += QString(",fade=t=in:st=0:d=%1").arg(num(std::min(kDip, dur / 3)));
+			v += QString(",fade=t=in:st=0:d=%1").arg(num(std::min(dipLen, dur / 3)));
 			break;
 		case Transition::ZoomPunch:
 			v += QString(",zoompan=z='max(1,1.35-0.35*it/0.3)':d=1:x='iw/2-iw/zoom/2':"

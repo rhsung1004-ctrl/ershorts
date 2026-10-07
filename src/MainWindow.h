@@ -63,6 +63,8 @@ private:
 	QSpinBox *m_bufferSec = nullptr;
 	QCheckBox *m_mic = nullptr;
 	QCheckBox *m_autoStart = nullptr;
+	QCheckBox *m_gameAudioOnly = nullptr;
+	QCheckBox *m_saveSound = nullptr;
 	QPushButton *m_toggleBtn = nullptr;
 	QPushButton *m_saveBtn = nullptr;
 
