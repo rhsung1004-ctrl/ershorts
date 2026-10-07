@@ -202,8 +202,11 @@ QString ShortsExporter::buildFilter()
 		const bool nextDips = (i + 1 < p.segments.size() && p.segments[i + 1].transIn == Transition::BlackDip);
 
 		QString v = QString("[%1:v]trim=start=%2:end=%3,").arg(in).arg(num(s.in), num(s.out)) + segmentSetpts(s);
-		if (s.zoom)
-			v += ",crop=iw/1.3:ih/1.3";
+		if (s.zoom) // 미리보기에서 고른 영역을 확대 (중심이 화면 밖으로 나가지 않게 고정)
+			v += QString(",crop=w='floor(iw/%1/2)*2':h='floor(ih/%1/2)*2':x='min(max(iw*%2-ow/2,0),iw-ow)':"
+				     "y='min(max(ih*%3-oh/2,0),ih-oh)'")
+				     .arg(num(std::clamp(s.zoomScale, 1.05, 4.0)), num(std::clamp(s.zoomCX, 0.0, 1.0)),
+					  num(std::clamp(s.zoomCY, 0.0, 1.0)));
 		if (s.shake)
 			v += ",crop=iw*0.92:ih*0.92:(iw-ow)/2+sin(t*47)*iw*0.025:(ih-oh)/2+cos(t*41)*ih*0.025";
 		v += QString(",scale=%1:%2:force_original_aspect_ratio=decrease,pad=%1:%2:(ow-iw)/2:(oh-ih)/2,"

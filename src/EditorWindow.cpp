@@ -30,7 +30,9 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QGraphicsPathItem>
 #include <QGraphicsRectItem>
+#include <QPainterPath>
 #include <QGraphicsScene>
 #include <QGraphicsSimpleTextItem>
 #include <QGraphicsVideoItem>
@@ -278,6 +280,26 @@ void EditorWindow::buildUi()
 	m_effectBadge->setPen(QPen(Qt::black, 2));
 	m_effectBadge->setPos(30, 30);
 	m_effectBadge->setZValue(20);
+
+	// 줌 영역 고르기: 바깥은 어둡게, 고른 영역은 노란 테두리
+	m_zoomShade = new QGraphicsPathItem(m_canvas);
+	m_zoomShade->setBrush(QColor(0, 0, 0, 150));
+	m_zoomShade->setPen(Qt::NoPen);
+	m_zoomShade->setZValue(14);
+	m_zoomRect = new QGraphicsRectItem(m_canvas);
+	m_zoomRect->setPen(QPen(QColor("#FFD84D"), 6, Qt::DashLine));
+	m_zoomRect->setBrush(Qt::NoBrush);
+	m_zoomRect->setZValue(15);
+	m_zoomHint = new QGraphicsSimpleTextItem("드래그: 영역 새로 그리기 · 안쪽 끌기: 이동 · 휠: 크기", m_canvas);
+	QFont hintFont("Malgun Gothic");
+	hintFont.setPixelSize(34);
+	hintFont.setBold(true);
+	m_zoomHint->setFont(hintFont);
+	m_zoomHint->setBrush(QColor("#FFD84D"));
+	m_zoomHint->setPen(QPen(Qt::black, 2));
+	m_zoomHint->setZValue(16);
+	for (QGraphicsItem *it : std::initializer_list<QGraphicsItem *>{m_zoomShade, m_zoomRect, m_zoomHint})
+		it->setVisible(false);
 
 	m_view = new FitView(m_scene);
 	m_view->setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform);
@@ -536,7 +558,7 @@ QWidget *EditorWindow::buildSegmentTab()
 	form->addRow("들어올 때 전환", m_segTrans);
 
 	auto *fxGrid = new QGridLayout;
-	m_fxZoom = new QCheckBox("줌인 (1.3배)");
+	m_fxZoom = new QCheckBox("줌인");
 	m_fxShake = new QCheckBox("화면 흔들림");
 	m_fxGray = new QCheckBox("흑백");
 	m_fxVivid = new QCheckBox("색감 강조 + 선명");
@@ -547,6 +569,38 @@ QWidget *EditorWindow::buildSegmentTab()
 		connect(fx[i], &QCheckBox::toggled, this, &EditorWindow::onSegmentPropsChanged);
 	}
 	form->addRow("효과", fxGrid);
+
+	// 줌 영역: 미리보기에서 마우스로 고르기
+	auto *zoomRow = new QHBoxLayout;
+	m_zoomPickBtn = new QPushButton("🔍 화면에서 줌 영역 고르기");
+	m_zoomPickBtn->setToolTip("미리보기에서 확대할 부분을 마우스로 드래그해서 고릅니다 (Esc로 끝내기)");
+	m_zoomPickBtn->setCheckable(true);
+	m_zoomScale = new QDoubleSpinBox;
+	m_zoomScale->setRange(1.05, 4.0);
+	m_zoomScale->setSingleStep(0.1);
+	m_zoomScale->setDecimals(2);
+	m_zoomScale->setSuffix(" 배");
+	m_zoomScale->setToolTip("확대 배율 (미리보기에서 영역을 고르면 자동으로 바뀜)");
+	zoomRow->addWidget(m_zoomPickBtn, 1);
+	zoomRow->addWidget(m_zoomScale);
+	form->addRow("줌 영역", zoomRow);
+	connect(m_zoomPickBtn, &QPushButton::clicked, this, [this](bool on) { setZoomPick(on); });
+	connect(m_zoomScale, &QDoubleSpinBox::valueChanged, this, [this](double z) {
+		const int i = m_timeline->selectedSegment();
+		if (m_syncing || i < 0 || i >= m_project.segments.size())
+			return;
+		m_project.segments[i].zoomScale = z; // 중심은 그대로 두고 배율만
+		updateOverlays(position());
+		projectChanged();
+	});
+	connect(m_fxZoom, &QCheckBox::toggled, this, [this](bool on) {
+		if (m_syncing)
+			return;
+		if (on && !m_zoomPick)
+			setZoomPick(true); // 줌인을 켜면 바로 영역 고르기
+		else if (!on && m_zoomPick)
+			setZoomPick(false);
+	});
 	connect(m_segSpeed, &QComboBox::currentIndexChanged, this, &EditorWindow::onSegmentPropsChanged);
 	connect(m_segTrans, &QComboBox::currentIndexChanged, this, &EditorWindow::onSegmentPropsChanged);
 
@@ -559,7 +613,8 @@ QWidget *EditorWindow::buildSegmentTab()
 		log("모든 컷의 전환: " + transitionName(t));
 	});
 	form->addRow(allTrans);
-	form->addRow(helpLabel("배속, 속도 램프, 줌인, 전환은 미리보기에 바로 보이고, 흑백/선명/비네팅/흔들림은 내보낸 영상에서 적용됩니다."));
+	form->addRow(helpLabel("줌인을 켜면 미리보기에서 확대할 부분을 마우스로 고를 수 있어요 (네모를 그리거나 끌어서 이동, 휠로 크기). "
+			       "배속, 속도 램프, 줌인, 전환은 미리보기에 바로 보이고, 흑백/선명/비네팅/흔들림은 내보낸 영상에서 적용됩니다."));
 
 	lay->addWidget(box);
 	lay->addStretch();
@@ -1220,6 +1275,163 @@ void EditorWindow::showStyleMenu()
 // ═════════════════════════════════════════════════════════════
 // 미리보기에서 끌어서 조정 (자막 세로 위치 / 제목 띠 레이아웃의 게임 화면 위치·확대)
 // ═════════════════════════════════════════════════════════════
+// ── 줌 영역 ────────────────────────────────────────
+// 원본 화면(W x H)에서 (W/z x H/z) 영역을 잘라 다시 W x H 로 키운 뒤 레이아웃이 적용됨 (내보내기와 같은 순서)
+bool EditorWindow::zoomGeometry(int seg, QRectF *V, QPointF *P, double *k, QSizeF *src) const
+{
+	if (seg < 0 || seg >= m_project.segments.size())
+		return false;
+	const int si = m_project.segments[seg].source;
+	if (si < 0 || si >= m_players.size() || si >= m_project.sources.size())
+		return false;
+	const QSize ss = m_project.sources[si].size;
+	QGraphicsVideoItem *item = m_players[si].item;
+	if (ss.isEmpty() || item->size().width() <= 0)
+		return false;
+	*P = item->data(0).isValid() ? item->data(0).toPointF() : item->pos();
+	*k = item->size().width() / ss.width();
+	*src = QSizeF(ss);
+	*V = m_videoClip->rect() & QRectF(*P, item->size()) & QRectF(0, 0, kCanvasW, kCanvasH);
+	return V->width() > 4 && V->height() > 4;
+}
+
+static QRectF zoomCropRect(const Segment &s, const QSizeF &src)
+{
+	const double z = std::clamp(s.zoomScale, 1.05, 4.0);
+	const double w = src.width() / z, h = src.height() / z;
+	const double x = std::clamp(s.zoomCX * src.width() - w / 2, 0.0, src.width() - w);
+	const double y = std::clamp(s.zoomCY * src.height() - h / 2, 0.0, src.height() - h);
+	return QRectF(x, y, w, h);
+}
+
+QRectF EditorWindow::zoomRectFromSegment(int seg) const
+{
+	QRectF V;
+	QPointF P;
+	double k = 1.0;
+	QSizeF src;
+	if (!zoomGeometry(seg, &V, &P, &k, &src))
+		return {};
+	const Segment &s = m_project.segments[seg];
+	const double z = std::clamp(s.zoomScale, 1.05, 4.0);
+	const QRectF Z = zoomCropRect(s, src);
+	const QRectF L((V.x() - P.x()) / k, (V.y() - P.y()) / k, V.width() / k, V.height() / k); // 보이는 영역 (원본 픽셀)
+	const QRectF R(Z.x() + L.x() / z, Z.y() + L.y() / z, L.width() / z, L.height() / z);
+	return QRectF(P.x() + R.x() * k, P.y() + R.y() * k, R.width() * k, R.height() * k);
+}
+
+void EditorWindow::setZoomFromRect(int seg, const QRectF &r)
+{
+	QRectF V;
+	QPointF P;
+	double k = 1.0;
+	QSizeF src;
+	if (!zoomGeometry(seg, &V, &P, &k, &src) || r.width() < 1)
+		return;
+	const QRectF L((V.x() - P.x()) / k, (V.y() - P.y()) / k, V.width() / k, V.height() / k);
+	const QRectF R((r.x() - P.x()) / k, (r.y() - P.y()) / k, r.width() / k, r.height() / k);
+	const double z = std::clamp(std::round(L.width() / R.width() * 100.0) / 100.0, 1.05, 4.0);
+	const double zx = R.x() - L.x() / z, zy = R.y() - L.y() / z; // 잘라낼 영역의 왼쪽 위
+	Segment &s = m_project.segments[seg];
+	s.zoomScale = z;
+	s.zoomCX = std::clamp((zx + src.width() / (2 * z)) / src.width(), 0.0, 1.0);
+	s.zoomCY = std::clamp((zy + src.height() / (2 * z)) / src.height(), 0.0, 1.0);
+	// 화면 밖으로 나간 만큼은 중심을 다시 안쪽으로 (저장값과 보이는 영역이 같도록)
+	const QRectF Z = zoomCropRect(s, src);
+	s.zoomCX = (Z.x() + Z.width() / 2) / src.width();
+	s.zoomCY = (Z.y() + Z.height() / 2) / src.height();
+	if (seg == m_timeline->selectedSegment()) {
+		m_syncing = true;
+		m_zoomScale->setValue(z);
+		m_syncing = false;
+	}
+	updateOverlays(position());
+	projectChanged();
+}
+
+QPointF EditorWindow::zoomOrigin(int seg) const
+{
+	QRectF V;
+	QPointF P;
+	double k = 1.0;
+	QSizeF src;
+	if (!zoomGeometry(seg, &V, &P, &k, &src))
+		return {};
+	const Segment &s = m_project.segments[seg];
+	const double z = std::clamp(s.zoomScale, 1.05, 4.0);
+	const QRectF Z = zoomCropRect(s, src);
+	// 기준점 o 로 z배 하면 잘라낸 영역의 왼쪽 위가 아이템 왼쪽 위로 옴: o = Z.topLeft * k * z / (z - 1)
+	return QPointF(Z.x() * k, Z.y() * k) * (z / (z - 1.0));
+}
+
+void EditorWindow::updateZoomOverlay()
+{
+	bool show = false;
+	if (m_zoomPick) {
+		const auto loc = m_project.locate(position());
+		QRectF V;
+		QPointF P;
+		double k = 1.0;
+		QSizeF src;
+		if (loc.kind == EditProject::Locate::Segment && loc.seg == m_zoomPickSeg &&
+		    zoomGeometry(m_zoomPickSeg, &V, &P, &k, &src)) {
+			const QRectF R = zoomRectFromSegment(m_zoomPickSeg);
+			QPainterPath path;
+			path.setFillRule(Qt::OddEvenFill);
+			path.addRect(V);
+			path.addRect(R);
+			m_zoomShade->setPath(path);
+			m_zoomRect->setRect(R);
+			const QRectF hb = m_zoomHint->boundingRect();
+			const double scaleText = std::min(1.0, (V.width() - 20) / std::max(1.0, hb.width()));
+			m_zoomHint->setScale(scaleText);
+			m_zoomHint->setPos(V.x() + (V.width() - hb.width() * scaleText) / 2, V.y() + 12);
+			show = true;
+		}
+	}
+	m_zoomShade->setVisible(show);
+	m_zoomRect->setVisible(show);
+	m_zoomHint->setVisible(show);
+}
+
+void EditorWindow::setZoomPick(bool on)
+{
+	if (on) {
+		const int i = m_timeline->selectedSegment();
+		if (i < 0 || i >= m_project.segments.size()) {
+			log("먼저 타임라인에서 줌을 넣을 구간을 선택하세요");
+			m_zoomPickBtn->setChecked(false);
+			return;
+		}
+		if (m_playing)
+			pause();
+		Segment &s = m_project.segments[i];
+		if (!s.zoom) {
+			s.zoom = true;
+			m_syncing = true;
+			m_fxZoom->setChecked(true);
+			m_syncing = false;
+			projectChanged();
+		}
+		m_zoomPick = true;
+		m_zoomPickSeg = i;
+		m_tabs->setCurrentIndex(1);
+		const double st = m_project.segmentStart(i);
+		const double d = s.outDuration();
+		if (position() < st || position() >= st + d)
+			seek(st + std::min(0.5, d / 2));
+		log("미리보기에서 확대할 부분을 드래그하세요 (안쪽을 끌면 이동, 휠로 크기, 끝나면 Esc 또는 더블클릭)");
+	} else {
+		m_zoomPick = false;
+		m_zoomPickSeg = -1;
+		m_drag = DragKind::None;
+		m_view->viewport()->setCursor(Qt::ArrowCursor);
+	}
+	m_zoomPickBtn->setChecked(m_zoomPick);
+	m_zoomPickBtn->setText(m_zoomPick ? "✔ 다 골랐어요 (Esc)" : "🔍 화면에서 줌 영역 고르기");
+	updateOverlays(position());
+}
+
 QSize EditorWindow::activeSourceSize() const
 {
 	if (m_activeSource >= 0 && m_activeSource < m_project.sources.size())
@@ -1253,6 +1465,76 @@ bool EditorWindow::eventFilter(QObject *obj, QEvent *e)
 {
 	if (!m_view || obj != m_view->viewport())
 		return QMainWindow::eventFilter(obj, e);
+
+	// ── 줌 영역 고르기 모드 ──
+	if (m_zoomPick && m_zoomRect->isVisible()) {
+		QRectF V;
+		QPointF P;
+		double k = 1.0;
+		QSizeF src;
+		if (zoomGeometry(m_zoomPickSeg, &V, &P, &k, &src)) {
+			switch (e->type()) {
+			case QEvent::MouseButtonPress: {
+				auto *me = static_cast<QMouseEvent *>(e);
+				if (me->button() != Qt::LeftButton)
+					return true;
+				const QPointF sp = m_view->mapToScene(me->position().toPoint());
+				const QRectF R = zoomRectFromSegment(m_zoomPickSeg);
+				m_drag = R.contains(sp) ? DragKind::ZoomMove : V.contains(sp) ? DragKind::ZoomDraw : DragKind::None;
+				m_dragAnchor = sp;
+				m_dragStartRect = R;
+				m_dragMoved = false;
+				return true;
+			}
+			case QEvent::MouseMove: {
+				auto *me = static_cast<QMouseEvent *>(e);
+				const QPointF sp = m_view->mapToScene(me->position().toPoint());
+				if (m_drag == DragKind::ZoomMove) {
+					if ((sp - m_dragAnchor).manhattanLength() < 1.0)
+						return true;
+					setZoomFromRect(m_zoomPickSeg, m_dragStartRect.translated(sp - m_dragAnchor));
+				} else if (m_drag == DragKind::ZoomDraw) {
+					const double dx = sp.x() - m_dragAnchor.x();
+					const double dy = sp.y() - m_dragAnchor.y();
+					if (!m_dragMoved && std::abs(dx) < 8 && std::abs(dy) < 8)
+						return true; // 그냥 클릭이면 영역 유지
+					m_dragMoved = true;
+					const double a = V.width() / V.height(); // 결과 화면과 같은 비율로 고정
+					const double w = std::max({std::abs(dx), std::abs(dy) * a, V.width() / 4.0});
+					const double h = w / a;
+					const double x = dx >= 0 ? m_dragAnchor.x() : m_dragAnchor.x() - w;
+					const double y = dy >= 0 ? m_dragAnchor.y() : m_dragAnchor.y() - h;
+					setZoomFromRect(m_zoomPickSeg, QRectF(x, y, w, h));
+				} else {
+					const QRectF R = zoomRectFromSegment(m_zoomPickSeg);
+					m_view->viewport()->setCursor(R.contains(sp)   ? Qt::SizeAllCursor
+								      : V.contains(sp) ? Qt::CrossCursor
+										       : Qt::ArrowCursor);
+				}
+				return true;
+			}
+			case QEvent::MouseButtonRelease:
+				m_drag = DragKind::None;
+				return true;
+			case QEvent::MouseButtonDblClick:
+				setZoomPick(false); // 더블클릭으로 끝내기
+				return true;
+			case QEvent::Wheel: {
+				auto *we = static_cast<QWheelEvent *>(e);
+				if (we->angleDelta().y() == 0)
+					return true;
+				const QRectF R = zoomRectFromSegment(m_zoomPickSeg);
+				const double f = we->angleDelta().y() > 0 ? 0.9 : 1.0 / 0.9; // 휠 위 = 더 확대(영역 작게)
+				QRectF n(0, 0, R.width() * f, R.height() * f);
+				n.moveCenter(R.center());
+				setZoomFromRect(m_zoomPickSeg, n);
+				return true;
+			}
+			default:
+				break;
+			}
+		}
+	}
 
 	switch (e->type()) {
 	case QEvent::MouseButtonPress: {
@@ -1372,6 +1654,10 @@ void EditorWindow::setupShortcuts()
 		connect(s, &QShortcut::activated, this, fn);
 	};
 	add(QKeySequence(Qt::Key_Space), [this] { togglePlay(); });
+	add(QKeySequence(Qt::Key_Escape), [this] {
+		if (m_zoomPick)
+			setZoomPick(false);
+	});
 	add(QKeySequence(Qt::Key_S), [this] { splitAtPlayhead(); });
 	add(QKeySequence(Qt::Key_B), [this] { splitSelectedOnBeats(); });
 	add(QKeySequence(Qt::Key_Delete), [this] { deleteSelectedSegment(); });
@@ -1589,6 +1875,8 @@ void EditorWindow::play()
 	const double total = m_project.totalDuration();
 	if (total <= 0)
 		return;
+	if (m_zoomPick)
+		setZoomPick(false);
 	if (m_pos >= total - 0.05)
 		m_pos = 0;
 	m_playStart = m_pos;
@@ -1899,6 +2187,7 @@ void EditorWindow::rebuildCardVisual()
 void EditorWindow::updateOverlays(double t)
 {
 	const auto loc = m_project.locate(t);
+	updateZoomOverlay();
 
 	// 자막
 	for (int i = 0; i < m_subVisuals.size() && i < m_project.subtitles.size(); ++i) {
@@ -1929,7 +2218,10 @@ void EditorWindow::updateOverlays(double t)
 	const Segment &seg = m_project.segments[loc.seg];
 	const double local = loc.local;
 	const double dur = seg.outDuration();
-	double scale = seg.zoom ? 1.3 : 1.0;
+	// 줌 영역을 고르는 중에는 원래 화면을 보여 줌
+	const bool picking = m_zoomPick && loc.seg == m_zoomPickSeg;
+	const bool zoomed = seg.zoom && !picking;
+	double scale = zoomed ? std::clamp(seg.zoomScale, 1.05, 4.0) : 1.0;
 	QPointF jitter;
 
 	// 영상 맨 처음(인트로 없음)은 흰 플래시 대신 검은 화면에서 서서히 (내보내기와 같게)
@@ -1983,6 +2275,8 @@ void EditorWindow::updateOverlays(double t)
 
 	if (seg.source >= 0 && seg.source < m_players.size()) {
 		QGraphicsVideoItem *item = m_players[seg.source].item;
+		item->setTransformOriginPoint(zoomed ? zoomOrigin(loc.seg)
+						     : QPointF(item->size().width() / 2, item->size().height() / 2));
 		item->setScale(scale);
 		if (item->data(0).isValid())
 			item->setPos(item->data(0).toPointF() + jitter);
@@ -1992,7 +2286,7 @@ void EditorWindow::updateOverlays(double t)
 	if (std::abs(seg.speed - 1.0) > 0.01)
 		info << QString("%1x").arg(seg.speedAt(loc.srcTime - seg.in), 0, 'f', 2);
 	for (const QString &n : seg.effectNames())
-		if (n != "줌인")
+		if (!n.startsWith("줌인"))
 			info << n;
 	if (!info.isEmpty()) {
 		m_effectBadge->setText(info.join(" · "));
@@ -2172,6 +2466,8 @@ void EditorWindow::selectSegment(int i)
 		m_lastSel = SelKind::Segment;
 	m_timeline->setSelectedSegment(i);
 	m_segProps->setEnabled(i >= 0);
+	if (m_zoomPick && i != m_zoomPickSeg)
+		setZoomPick(false);
 	if (i < 0) {
 		m_segInfo->setText("타임라인에서 구간을 클릭하세요");
 		return;
@@ -2191,6 +2487,7 @@ void EditorWindow::selectSegment(int i)
 	m_segSpeed->setCurrentIndex(speedIdx);
 	m_segTrans->setCurrentIndex(int(s.transIn));
 	m_fxZoom->setChecked(s.zoom);
+	m_zoomScale->setValue(s.zoomScale);
 	m_fxShake->setChecked(s.shake);
 	m_fxGray->setChecked(s.gray);
 	m_fxVivid->setChecked(s.vivid);

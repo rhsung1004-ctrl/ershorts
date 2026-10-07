@@ -34,7 +34,10 @@ struct Segment {
 	Transition transIn = Transition::None;
 
 	// 구간 효과
-	bool zoom = false;     // 1.3배 확대
+	bool zoom = false;     // 확대
+	double zoomScale = 1.3; // 확대 배율 (원본 화면 기준)
+	double zoomCX = 0.5;    // 확대 중심 (원본 화면 기준 0~1, 미리보기에서 마우스로 지정)
+	double zoomCY = 0.5;
 	bool shake = false;    // 화면 흔들림
 	bool gray = false;     // 흑백
 	bool vivid = false;    // 색감 강조 + 선명

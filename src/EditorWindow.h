@@ -13,6 +13,7 @@ class QAudioOutput;
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
+class QGraphicsPathItem;
 class QGraphicsRectItem;
 class QGraphicsScene;
 class QGraphicsSimpleTextItem;
@@ -80,9 +81,17 @@ private:
 	void showStyleMenu();
 
 	// ── 미리보기에서 직접 끌어서 조정 ──
-	enum class DragKind { None, Subtitle, Video };
+	enum class DragKind { None, Subtitle, Video, ZoomMove, ZoomDraw };
 	DragKind previewHit(const QPointF &scenePos, int *subIndex) const;
 	QSize activeSourceSize() const;
+
+	// ── 줌 영역 고르기 (선택한 구간의 확대 영역을 미리보기에서 마우스로 지정) ──
+	void setZoomPick(bool on);
+	bool zoomGeometry(int seg, QRectF *visible, QPointF *itemPos, double *k, QSizeF *src) const;
+	QRectF zoomRectFromSegment(int seg) const;      // 장면 좌표
+	void setZoomFromRect(int seg, const QRectF &r); // 장면 좌표 → 구간의 배율/중심
+	QPointF zoomOrigin(int seg) const;              // 미리보기 확대 기준점 (영상 아이템 좌표)
+	void updateZoomOverlay();
 	void loadUiFromProject(bool keepPosition = false);
 
 	// ── 실행 취소 / 다시 실행 (프로젝트 전체 스냅샷) ──
@@ -195,6 +204,16 @@ private:
 	double m_dragStartY = 0.0;     // 장면 좌표
 	double m_dragStartValue = 0.0; // 자막 y 또는 영상 offsetY
 	bool m_dragMoved = false;
+	QPointF m_dragAnchor;
+	QRectF m_dragStartRect;
+
+	bool m_zoomPick = false;
+	int m_zoomPickSeg = -1;
+	QGraphicsPathItem *m_zoomShade = nullptr;
+	QGraphicsRectItem *m_zoomRect = nullptr;
+	QGraphicsSimpleTextItem *m_zoomHint = nullptr;
+	QDoubleSpinBox *m_zoomScale = nullptr;
+	QPushButton *m_zoomPickBtn = nullptr;
 
 	QComboBox *m_styleCombo = nullptr;
 

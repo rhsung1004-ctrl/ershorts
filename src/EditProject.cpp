@@ -456,7 +456,8 @@ QJsonObject EditProject::toJson() const
 	for (const Segment &s : segments)
 		segs.append(QJsonObject{
 			{"source", s.source}, {"in", s.in}, {"out", s.out}, {"speed", s.speed},
-			{"transIn", int(s.transIn)}, {"zoom", s.zoom}, {"shake", s.shake}, {"gray", s.gray},
+			{"transIn", int(s.transIn)}, {"zoom", s.zoom}, {"zoomScale", s.zoomScale},
+			{"zoomCX", s.zoomCX}, {"zoomCY", s.zoomCY}, {"shake", s.shake}, {"gray", s.gray},
 			{"vivid", s.vivid}, {"vignette", s.vignette}, {"rampIn", s.rampIn},
 			{"rampOut", s.rampOut}, {"rampLen", s.rampLen}});
 
@@ -515,6 +516,9 @@ void EditProject::fromJson(const QJsonObject &o)
 		s.speed = std::clamp(j.value("speed").toDouble(1.0), 0.25, 4.0);
 		s.transIn = Transition(std::clamp(j.value("transIn").toInt(), 0, kTransitionCount - 1));
 		s.zoom = j.value("zoom").toBool();
+		s.zoomScale = std::clamp(j.value("zoomScale").toDouble(1.3), 1.05, 4.0);
+		s.zoomCX = std::clamp(j.value("zoomCX").toDouble(0.5), 0.0, 1.0);
+		s.zoomCY = std::clamp(j.value("zoomCY").toDouble(0.5), 0.0, 1.0);
 		s.shake = j.value("shake").toBool();
 		s.gray = j.value("gray").toBool();
 		s.vivid = j.value("vivid").toBool();
