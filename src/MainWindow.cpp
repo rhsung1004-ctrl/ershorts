@@ -40,6 +40,10 @@
 #include <QSplitter>
 #include <QStandardPaths>
 #include <QTimer>
+#include <QStorageInfo>
+#include <QProgressDialog>
+#include <QHash>
+#include <QCoreApplication>
 
 #include <future>
 #include <QPainter>
@@ -215,6 +219,16 @@ void MainWindow::buildUi()
 	recForm->addRow("캡처 방식", m_captureMode);
 	recForm->addRow("게임 창", winRow);
 	recForm->addRow("버퍼 길이", m_bufferSec);
+	// 저장 폴더 (클립·쇼츠·프로젝트가 이 아래 clips / shorts / projects 폴더에 저장됨)
+	m_outDirEdit = new QLineEdit;
+	m_outDirEdit->setReadOnly(true);
+	auto *outDirBtn = new QPushButton("변경…");
+	outDirBtn->setToolTip("클립·쇼츠·프로젝트를 저장할 폴더 (D드라이브 등 다른 드라이브도 가능)");
+	auto *outRow = new QHBoxLayout;
+	outRow->addWidget(m_outDirEdit, 1);
+	outRow->addWidget(outDirBtn);
+	recForm->addRow("저장 폴더", outRow);
+	connect(outDirBtn, &QPushButton::clicked, this, &MainWindow::chooseOutputDir);
 	recForm->addRow(m_mic);
 	recForm->addRow(m_gameAudioOnly);
 	recForm->addRow(m_saveSound);
@@ -361,6 +375,7 @@ void MainWindow::loadSettings()
 	m_outputDir = s.value("outputDir",
 			      QStandardPaths::writableLocation(QStandardPaths::MoviesLocation) + "/ERShorts")
 			      .toString();
+	updateOutputDirLabel();
 }
 
 void MainWindow::saveSettings()
@@ -921,4 +936,144 @@ void MainWindow::renameClipsByGameTime()
 	}
 	if (done > 0)
 		refreshClipList();
+}
+
+// ─── 저장 폴더 ────────────────────────────────────────────
+void MainWindow::updateOutputDirLabel()
+{
+	m_outDirEdit->setText(QDir::toNativeSeparators(m_outputDir));
+	m_outDirEdit->setToolTip(QString("클립: %1\n쇼츠: %2\n프로젝트: %3")
+					 .arg(QDir::toNativeSeparators(clipDir()), QDir::toNativeSeparators(shortsDir()),
+					      QDir::toNativeSeparators(projectsDir())));
+}
+
+static bool moveFileAnyDrive(const QString &from, const QString &to)
+{
+	if (QFile::rename(from, to)) // 같은 드라이브면 바로 이동
+		return true;
+	if (!QFile::copy(from, to)) // 다른 드라이브: 복사 후 원본 삭제
+		return false;
+	if (!QFile::remove(from)) { // 원본이 사용 중이면 복사본을 지우고 원래대로 둠
+		QFile::remove(to);
+		return false;
+	}
+	return true;
+}
+
+void MainWindow::chooseOutputDir()
+{
+	if (!findChildren<EditorWindow *>().isEmpty()) {
+		QMessageBox::information(this, "저장 폴더", "열려 있는 편집 창을 먼저 닫아 주세요.");
+		return;
+	}
+	const QString picked = QFileDialog::getExistingDirectory(this, "저장 폴더 선택 (이 안에 clips / shorts / projects 폴더가 생겨요)",
+								m_outputDir);
+	if (picked.isEmpty())
+		return;
+	const QString newDir = QDir::cleanPath(picked);
+	if (QDir::cleanPath(m_outputDir).compare(newDir, Qt::CaseInsensitive) == 0)
+		return;
+
+	// 쓸 수 있는 폴더인지 확인
+	if (!QDir().mkpath(newDir + "/clips")) {
+		QMessageBox::warning(this, "저장 폴더", "이 폴더에는 저장할 수 없어요. 다른 폴더를 골라 주세요.");
+		return;
+	}
+	{
+		QFile probe(newDir + "/clips/.ershorts_write_test");
+		if (!probe.open(QIODevice::WriteOnly)) {
+			QMessageBox::warning(this, "저장 폴더", "이 폴더에 쓸 권한이 없어요. 다른 폴더를 골라 주세요.");
+			return;
+		}
+		probe.close();
+		probe.remove();
+	}
+	const QStorageInfo storage(newDir);
+	if (storage.isValid() && storage.bytesAvailable() < qint64(5) * 1024 * 1024 * 1024)
+		log(QString("⚠ 새 저장 위치의 남은 공간이 %1 GB 뿐이에요").arg(storage.bytesAvailable() / double(1 << 30), 0, 'f', 1));
+
+	// 기존 클립·프로젝트를 옮길지 물어봄 (쇼츠 결과물은 그대로 둠)
+	const QStringList oldClips = QDir(clipDir()).entryList({"*.mp4", "*.mkv"}, QDir::Files);
+	const QStringList oldProjects = QDir(projectsDir()).entryList({"*.json"}, QDir::Files);
+	bool move = false;
+	if (!oldClips.isEmpty() || !oldProjects.isEmpty()) {
+		QMessageBox box(this);
+		box.setWindowTitle("저장 폴더 변경");
+		box.setText(QString("기존 클립 %1개와 프로젝트 %2개도 새 폴더로 옮길까요?\n"
+				    "(다른 드라이브면 시간이 조금 걸려요. 만든 쇼츠 영상은 원래 폴더에 그대로 남아요.)")
+				    .arg(oldClips.size())
+				    .arg(oldProjects.size()));
+		auto *moveBtn = box.addButton("옮기기", QMessageBox::AcceptRole);
+		box.addButton("옮기지 않고 새 클립만 저장", QMessageBox::RejectRole);
+		box.exec();
+		move = (box.clickedButton() == moveBtn);
+	}
+
+	const QString oldClipDir = clipDir(), oldProjectDir = projectsDir();
+	if (move) {
+		m_clipInfo->cancelAll(); // 목록용 장면 추출이 파일을 붙잡고 있지 않게
+		QDir().mkpath(newDir + "/projects");
+		QProgressDialog progress("옮기는 중…", QString(), 0, int(oldClips.size() + oldProjects.size()), this);
+		progress.setWindowModality(Qt::WindowModal);
+		progress.setMinimumDuration(300);
+		QHash<QString, QString> moved; // 옛 경로 → 새 경로 (프로젝트 안의 클립 경로 고치기용)
+		int done = 0, failed = 0, projectsMoved = 0;
+		for (const QString &name : oldClips) {
+			progress.setLabelText("클립 옮기는 중: " + name);
+			QCoreApplication::processEvents();
+			QString to = newDir + "/clips/" + name;
+			for (int n = 2; QFileInfo::exists(to); ++n)
+				to = newDir + "/clips/" + QFileInfo(name).completeBaseName() + QString(" (%1).").arg(n) +
+				     QFileInfo(name).suffix();
+			const QString from = oldClipDir + "/" + name;
+			if (moveFileAnyDrive(from, to))
+				moved.insert(QDir::cleanPath(QFileInfo(from).absoluteFilePath()).toLower(),
+					     QDir::cleanPath(QFileInfo(to).absoluteFilePath()));
+			else
+				++failed;
+			progress.setValue(++done);
+		}
+		for (const QString &name : oldProjects) {
+			QString to = newDir + "/projects/" + name;
+			for (int n = 2; QFileInfo::exists(to); ++n)
+				to = newDir + "/projects/" + QFileInfo(name).completeBaseName() + QString(" (%1).json").arg(n);
+			if (!moveFileAnyDrive(oldProjectDir + "/" + name, to)) {
+				++failed;
+			} else {
+				++projectsMoved;
+				// 프로젝트 안의 클립 경로를 새 위치로
+				QFile f(to);
+				if (f.open(QIODevice::ReadOnly)) {
+					QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
+					f.close();
+					QJsonArray sources = root.value("sources").toArray();
+					bool changed = false;
+					for (int i = 0; i < sources.size(); ++i) {
+						QJsonObject src = sources[i].toObject();
+						const QString key = QDir::cleanPath(src.value("path").toString()).toLower();
+						if (moved.contains(key)) {
+							src["path"] = moved.value(key);
+							sources[i] = src;
+							changed = true;
+						}
+					}
+					if (changed && f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+						root["sources"] = sources;
+						f.write(QJsonDocument(root).toJson());
+					}
+				}
+			}
+			progress.setValue(++done);
+		}
+		log(QString("클립 %1개, 프로젝트 %2개를 옮겼어요").arg(moved.size()).arg(projectsMoved));
+		if (failed > 0)
+			log(QString("⚠ %1개는 사용 중이라 옮기지 못했어요 (원래 폴더에 그대로 있어요)").arg(failed));
+	}
+
+	m_outputDir = newDir;
+	saveSettings();
+	updateOutputDirLabel();
+	onApplySettings(); // 녹화 저장 위치 적용 (버퍼가 켜져 있었으면 다시 시작)
+	refreshClipList();
+	log("저장 폴더: " + QDir::toNativeSeparators(newDir));
 }

@@ -78,6 +78,10 @@ private:
 	QString renameToGameTime(const QString &path, const QString &label, const QString &tag, const QDateTime &when);
 	void renameClipsByGameTime();
 
+	// 저장 폴더 바꾸기 (다른 드라이브 가능)
+	void chooseOutputDir();
+	void updateOutputDirLabel();
+
 	ObsCore *m_core = nullptr;
 	GlobalHotkey *m_hotkey = nullptr;
 
@@ -99,6 +103,7 @@ private:
 	QString m_killWhat;       // 이번 자동 저장의 종류 (킬/어시스트)
 	QString m_killLabel;      // 첫 킬 때의 게임 시간
 	QCheckBox *m_nameByClock = nullptr;
+	QLineEdit *m_outDirEdit = nullptr;
 	struct PendingName {
 		QString label;
 		QString tag;
