@@ -84,10 +84,20 @@ void PreviewWidget::createDisplay()
 	m_display = obs_display_create(&info, 0xFF1E1E24);
 	if (m_display) {
 		obs_display_add_draw_callback(m_display, &PreviewWidget::draw, this);
+		obs_display_set_enabled(m_display, m_rendering);
 		qInfo("미리보기 디스플레이 생성 (%dx%d)", size.width(), size.height());
 	} else {
 		qWarning("미리보기 디스플레이 생성 실패");
 	}
+}
+
+void PreviewWidget::setRendering(bool on)
+{
+	if (on == m_rendering)
+		return;
+	m_rendering = on;
+	if (m_display)
+		obs_display_set_enabled(m_display, on);
 }
 
 void PreviewWidget::resizeDisplay()

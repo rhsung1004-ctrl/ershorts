@@ -1,5 +1,6 @@
 #include "ThumbnailCache.h"
 
+#include "ProcessUtil.h"
 #include "ShortsExporter.h"
 
 #include <QCryptographicHash>
@@ -15,6 +16,7 @@
 ThumbnailCache::ThumbnailCache(QObject *parent) : QObject(parent)
 {
 	m_proc.setProcessChannelMode(QProcess::MergedChannels);
+	setLowPriority(m_proc);
 	connect(&m_proc, &QProcess::readyRead, this, [this] { m_proc.readAll(); }); // 출력은 버림
 	connect(&m_proc, &QProcess::finished, this, &ThumbnailCache::onFinished);
 }
@@ -76,7 +78,7 @@ void ThumbnailCache::startNext()
 	QDir().mkpath(m_currentDir);
 
 	m_proc.start(ShortsExporter::ffmpegPath(),
-		     {"-hide_banner", "-loglevel", "error", "-y", "-i", m_current, "-an",
+		     {"-hide_banner", "-loglevel", "error", "-y", "-hwaccel", "auto", "-i", m_current, "-an",
 		      "-vf", QString("fps=%1,scale=-2:%2").arg(1.0 / kInterval).arg(kHeight), "-q:v", "6",
 		      m_currentDir + "/%05d.jpg"});
 }

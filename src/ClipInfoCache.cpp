@@ -1,5 +1,6 @@
 #include "ClipInfoCache.h"
 
+#include "ProcessUtil.h"
 #include "ShortsExporter.h"
 
 #include <QCryptographicHash>
@@ -13,6 +14,7 @@
 ClipInfoCache::ClipInfoCache(QObject *parent) : QObject(parent)
 {
 	m_proc.setProcessChannelMode(QProcess::MergedChannels);
+	setLowPriority(m_proc);
 	connect(&m_proc, &QProcess::readyRead, this, [this] { m_output += m_proc.readAll(); });
 	connect(&m_proc, &QProcess::finished, this, &ClipInfoCache::onFinished);
 }

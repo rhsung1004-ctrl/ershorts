@@ -140,6 +140,8 @@ ShortsExporter::ShortsExporter(QObject *parent) : QObject(parent)
 	connect(&m_proc, &QProcess::finished, this, &ShortsExporter::onFinished);
 }
 
+int ShortsExporter::s_lastGoodEncoder = 0;
+
 ShortsExporter::~ShortsExporter() { cancel(); }
 
 QString ShortsExporter::ffmpegPath()
@@ -475,28 +477,41 @@ QString ShortsExporter::buildFilter()
 	return g.join(';');
 }
 
-QStringList ShortsExporter::buildArgs(bool useHw)
+QStringList ShortsExporter::buildArgs(int enc)
 {
 	QStringList a;
 	a << "-hide_banner" << "-y";
-	for (const QString &in : m_inputs)
-		a << "-i" << in;
+	for (int i = 0; i < m_inputs.size(); ++i) {
+		// 게임 클립은 GPU로 풀어서(디코딩) CPU 부담과 시간을 줄임 (안 되면 ffmpeg가 알아서 CPU로)
+		if (m_inputOf.values().contains(i))
+			a << "-hwaccel" << "auto";
+		a << "-i" << m_inputs[i];
+	}
 	a << "-filter_complex" << m_filter << "-map" << "[v]" << "-map" << "[aout]";
 
-	if (m_previewQuality) {
-		// 확인용: 작고 빠르게
-		if (useHw)
-			a << "-c:v" << "h264_nvenc" << "-preset" << "p1" << "-rc" << "vbr" << "-cq" << "30" << "-b:v" << "0";
-		else
-			a << "-c:v" << "libx264" << "-preset" << "ultrafast" << "-crf" << "30";
-		a << "-pix_fmt" << "yuv420p" << "-r" << "30" << "-c:a" << "aac" << "-b:a" << "128k";
-	} else {
-		if (useHw)
-			a << "-c:v" << "h264_nvenc" << "-preset" << "p5" << "-rc" << "vbr" << "-cq" << "20" << "-b:v" << "0";
-		else
-			a << "-c:v" << "libx264" << "-preset" << "medium" << "-crf" << "19";
-		a << "-pix_fmt" << "yuv420p" << "-r" << "60" << "-c:a" << "aac" << "-b:a" << "192k";
+	const bool fast = m_previewQuality; // 확인용: 작고 빠르게
+	switch (enc) {
+	case 0: // NVIDIA
+		a << "-c:v" << "h264_nvenc" << "-preset" << (fast ? "p1" : "p5") << "-rc" << "vbr" << "-cq"
+		  << (fast ? "30" : "20") << "-b:v" << "0" << "-pix_fmt" << "yuv420p";
+		break;
+	case 1: // AMD
+		a << "-c:v" << "h264_amf" << "-quality" << (fast ? "speed" : "quality") << "-rc" << "cqp" << "-qp_i"
+		  << (fast ? "30" : "20") << "-qp_p" << (fast ? "30" : "22") << "-pix_fmt" << "yuv420p";
+		break;
+	case 2: // Intel
+		a << "-c:v" << "h264_qsv" << "-preset" << (fast ? "veryfast" : "medium") << "-global_quality"
+		  << (fast ? "30" : "21") << "-pix_fmt" << "nv12";
+		break;
+	default: // CPU
+		a << "-c:v" << "libx264" << "-preset" << (fast ? "ultrafast" : "faster") << "-crf" << (fast ? "30" : "18")
+		  << "-pix_fmt" << "yuv420p";
+		break;
 	}
+	if (fast)
+		a << "-r" << "30" << "-c:a" << "aac" << "-b:a" << "128k";
+	else
+		a << "-r" << "60" << "-c:a" << "aac" << "-b:a" << "192k";
 	a << "-movflags" << "+faststart" << m_output;
 	return a;
 }
@@ -554,19 +569,20 @@ void ShortsExporter::start(const EditProject &project, const QString &output, bo
 	}
 
 	m_filter = buildFilter();
-	run(true);
+	run(s_lastGoodEncoder); // 지난번에 성공한 인코더부터
 }
 
-void ShortsExporter::run(bool useHw)
+void ShortsExporter::run(int encoder)
 {
-	m_usingHw = useHw;
+	m_encoder = encoder;
+	static const char *names[] = {"NVIDIA", "AMD", "Intel", "CPU"};
 	m_errBuf.clear();
 	emit logMessage(QString("%1 내보내기 시작 (%2, 결과 길이 %3초)")
 				.arg(m_previewQuality ? QStringLiteral("미리보기(540x960)") : QStringLiteral("고화질"))
-				.arg(useHw ? "NVENC" : "x264")
+				.arg(names[std::clamp(encoder, 0, 3)])
 				.arg(m_project.totalDuration(), 0, 'f', 1));
 	emit progress(0);
-	m_proc.start(ffmpegPath(), buildArgs(useHw));
+	m_proc.start(ffmpegPath(), buildArgs(encoder));
 }
 
 void ShortsExporter::cancel()
@@ -601,11 +617,13 @@ void ShortsExporter::onFinished(int code, QProcess::ExitStatus status)
 {
 	const bool ok = (status == QProcess::NormalExit && code == 0);
 
-	if (!ok && !m_cancelled && m_usingHw && status == QProcess::NormalExit) {
-		emit logMessage("NVENC 인코딩 실패 → CPU(x264)로 다시 시도합니다");
-		run(false);
+	if (!ok && !m_cancelled && m_encoder < 3 && status == QProcess::NormalExit) {
+		// 이 그래픽카드 인코더를 못 쓰면 다음 것으로 (마지막은 CPU)
+		run(m_encoder + 1);
 		return;
 	}
+	if (ok)
+		s_lastGoodEncoder = m_encoder;
 
 	m_tmp.reset();
 	if (ok) {

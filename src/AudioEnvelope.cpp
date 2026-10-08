@@ -1,5 +1,6 @@
 #include "AudioEnvelope.h"
 
+#include "ProcessUtil.h"
 #include "ShortsExporter.h"
 
 #include <algorithm>
@@ -8,6 +9,7 @@
 
 AudioEnvelope::AudioEnvelope(QObject *parent) : QObject(parent)
 {
+	setLowPriority(m_proc);
 	connect(&m_proc, &QProcess::readyReadStandardOutput, this, [this] { m_pcm += m_proc.readAllStandardOutput(); });
 	connect(&m_proc, &QProcess::readyReadStandardError, this, [this] { m_proc.readAllStandardError(); });
 	connect(&m_proc, &QProcess::finished, this, &AudioEnvelope::onFinished);

@@ -36,8 +36,9 @@ private:
 	QString buildFilter();
 	QString cardFilter(const TitleCard &card, const QString &tag, int frames);
 	QString writeTextFile(const QString &name, const QString &text);
-	QStringList buildArgs(bool useHw);
-	void run(bool useHw);
+	// 인코더: 0 = NVIDIA, 1 = AMD, 2 = Intel, 3 = CPU(x264)
+	QStringList buildArgs(int encoder);
+	void run(int encoder);
 	void onStdErr();
 	void onFinished(int code, QProcess::ExitStatus status);
 
@@ -50,7 +51,8 @@ private:
 	QVector<int> m_sfxInput; // 효과음별 입력 번호 (-1 = 파일 없음)
 	QVector<int> m_imgInput; // 이미지별 입력 번호
 	QString m_filter;
-	bool m_usingHw = true;
+	int m_encoder = 0;
+	static int s_lastGoodEncoder;
 	bool m_previewQuality = false;
 	bool m_cancelled = false;
 	QByteArray m_errBuf;

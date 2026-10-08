@@ -40,6 +40,8 @@ public:
 	explicit ObsCore(QObject *parent = nullptr);
 	~ObsCore() override;
 
+	// 녹화 화질 (startup 전에 설정): 0 = 원본 60fps, 1 = 원본 30fps, 2 = 1080p 60fps, 3 = 1080p 30fps
+	void setVideoQuality(int q) { m_quality = q; }
 	bool startup(QString *error);
 	void shutdown();
 
@@ -92,6 +94,7 @@ private:
 	bool m_started = false;
 
 	uint32_t m_baseW = 1920, m_baseH = 1080;
+	int m_quality = 0;
 
 	obs_scene_t *m_scene = nullptr;
 	obs_source_t *m_capture = nullptr;
@@ -113,6 +116,8 @@ private:
 	std::atomic<bool> m_clockOn{false};
 	std::unique_ptr<GameClock> m_clock;
 	int m_rawFrame = 0; // 영상 스레드 전용
+	uint32_t m_rawDivisor = 0;
+	uint32_t m_convW = 0, m_convH = 0; // 화면 읽기용으로 줄인 크기
 	std::atomic<int> m_capW{0}, m_capH{0}; // 게임 화면(캡처 소스) 크기
 	QTimer *m_capSizeTimer = nullptr;
 };

@@ -72,7 +72,14 @@ bool ObsCore::startup(QString *error)
 	obs_log_loaded_modules();
 
 	createScene();
-	emit logMessage(QString("OBS 초기화 완료 (%1x%2)").arg(m_baseW).arg(m_baseH));
+	obs_video_info ovi = {};
+	obs_get_video_info(&ovi);
+	emit logMessage(QString("OBS 초기화 완료 (화면 %1x%2 → 녹화 %3x%4, %5fps)")
+				.arg(m_baseW)
+				.arg(m_baseH)
+				.arg(ovi.output_width)
+				.arg(ovi.output_height)
+				.arg(ovi.fps_den ? ovi.fps_num / ovi.fps_den : 0));
 	return true;
 }
 
@@ -95,13 +102,21 @@ bool ObsCore::resetVideo(QString *error)
 
 	obs_video_info vi = {};
 	vi.graphics_module = "libobs-d3d11";
-	vi.fps_num = 60;
+	const bool fps30 = (m_quality == 1 || m_quality == 3);
+	const bool hd1080 = (m_quality == 2 || m_quality == 3);
+	vi.fps_num = fps30 ? 30 : 60;
 	vi.fps_den = 1;
 	vi.base_width = m_baseW;
 	vi.base_height = m_baseH;
-	// 세로 크롭 시 화질 손실을 줄이려고 출력 해상도 = 원본 해상도로 녹화
-	vi.output_width = m_baseW;
-	vi.output_height = m_baseH;
+	// 기본: 세로 크롭 시 화질 손실을 줄이려고 출력 해상도 = 원본 해상도
+	// 가벼운 설정: 높이 1080 으로 줄여 녹화 (인코더·메모리 부담 감소)
+	uint32_t outW = m_baseW, outH = m_baseH;
+	if (hd1080 && m_baseH > 1080) {
+		outW = uint32_t(std::lround(m_baseW * 1080.0 / m_baseH)) & ~1u;
+		outH = 1080;
+	}
+	vi.output_width = outW;
+	vi.output_height = outH;
 	vi.output_format = VIDEO_FORMAT_NV12;
 	vi.colorspace = VIDEO_CS_709;
 	vi.range = VIDEO_RANGE_PARTIAL;
@@ -549,22 +564,32 @@ QString ObsCore::lastOcrText() const { return QString::fromStdString(m_clock->la
 void ObsCore::updateRawCallback()
 {
 	const bool want = m_started && (m_hudOn || m_clockOn);
-	if (want == m_rawCbOn)
+	// 킬 숫자 감시는 초당 5장, 게임 시간만이면 초당 1장 (fps 60 기준)
+	obs_video_info ovi = {};
+	const uint32_t fps = obs_get_video_info(&ovi) && ovi.fps_den ? ovi.fps_num / ovi.fps_den : 60;
+	const uint32_t divisor = std::max<uint32_t>(1, m_hudOn ? fps / 5 : fps);
+	if (want == m_rawCbOn && (!want || divisor == m_rawDivisor))
 		return;
-	if (want) {
-		updateCaptureSize();
-		// 전체 범위 NV12, 60fps 중 12장마다 1장 = 초당 5장
-		video_scale_info conv = {};
-		conv.format = VIDEO_FORMAT_NV12;
-		conv.width = m_baseW;
-		conv.height = m_baseH;
-		conv.range = VIDEO_RANGE_FULL;
-		conv.colorspace = VIDEO_CS_709;
-		obs_add_raw_video_callback2(&conv, 12, &ObsCore::onRawVideo, this);
-	} else {
+	if (m_rawCbOn) {
 		obs_remove_raw_video_callback(&ObsCore::onRawVideo, this);
+		m_rawCbOn = false;
 	}
-	m_rawCbOn = want;
+	if (!want)
+		return;
+	updateCaptureSize();
+	// 화면 읽기에는 높이 900 정도면 충분 → 그만큼만 줄여서 받아 GPU→CPU 복사량을 줄임 (1600p 기준 약 1/3)
+	const double k = std::min(1.0, 900.0 / std::max<uint32_t>(1, m_baseH));
+	m_convW = uint32_t(std::lround(m_baseW * k)) & ~1u;
+	m_convH = uint32_t(std::lround(m_baseH * k)) & ~1u;
+	video_scale_info conv = {};
+	conv.format = VIDEO_FORMAT_NV12;
+	conv.width = m_convW;
+	conv.height = m_convH;
+	conv.range = VIDEO_RANGE_FULL;
+	conv.colorspace = VIDEO_CS_709;
+	obs_add_raw_video_callback2(&conv, divisor, &ObsCore::onRawVideo, this);
+	m_rawDivisor = divisor;
+	m_rawCbOn = true;
 }
 
 void ObsCore::onRawVideo(void *param, struct video_data *frame)
@@ -575,7 +600,7 @@ void ObsCore::onRawVideo(void *param, struct video_data *frame)
 		return;
 
 	// 게임 화면이 캔버스 안에 들어간 자리 (가운데 맞춤, 비율 유지)
-	const double W = self->m_baseW, H = self->m_baseH;
+	const double W = self->m_convW, H = self->m_convH; // 줄여서 받은 화면 크기
 	const double s = std::min(W / sw, H / sh);
 	const double gw = sw * s, gh = sh * s;
 	const double gx = (W - gw) / 2, gy = (H - gh) / 2;
@@ -584,7 +609,9 @@ void ObsCore::onRawVideo(void *param, struct video_data *frame)
 	const double y0 = gy + HudKillWatcher::kRoiTop * u;
 
 	// ── 게임 시간 (1초에 한 번): 가운데 위 영역을 RGB 로 ──
-	if (self->m_clockOn && (self->m_rawFrame++ % 5) == 0 && frame->data[1]) {
+	// 킬 감시가 켜져 있으면 초당 5장 중 1장, 아니면 매 장(초당 1장)
+	const bool clockTurn = !self->m_hudOn || (self->m_rawFrame++ % 5) == 0;
+	if (self->m_clockOn && clockTurn && frame->data[1]) {
 		thread_local std::vector<uint8_t> rgb(size_t(GameClock::kW) * GameClock::kH * 3);
 		const uint8_t *Yp = frame->data[0];
 		const uint8_t *UV = frame->data[1];

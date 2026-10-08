@@ -2460,6 +2460,10 @@ void EditorWindow::seek(double t)
 
 void EditorWindow::tick()
 {
+	// 멈춰 있을 때는 할 일이 없음 (위치를 옮기거나 편집하면 seek/updateOverlays 가 직접 다시 그림)
+	// → 예전엔 멈춰 있어도 1초에 50번 타임라인·미리보기를 다시 그려 CPU를 계속 썼음
+	if (!m_playing && !m_zoomPick)
+		return;
 	double t = position();
 	const double total = m_project.totalDuration();
 	if (m_playing && t >= total) {

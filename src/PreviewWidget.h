@@ -15,6 +15,8 @@ public:
 
 	void destroyDisplay();
 	void setDisplayEnabled(bool on) { m_enabled = on; }
+	// 그리기 멈춤/재개 (게임 중 GPU 아끼기). 디스플레이는 그대로 둠
+	void setRendering(bool on);
 	void setCropGuideVisible(bool v) { m_showGuide = v; }
 
 	QPaintEngine *paintEngine() const override { return nullptr; }
@@ -34,6 +36,7 @@ private:
 	obs_display_t *m_display = nullptr;
 	bool m_showGuide = true;
 	bool m_enabled = true;
+	bool m_rendering = true;
 	bool m_hooked = false;
 	bool m_destroying = false;
 };

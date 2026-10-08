@@ -34,6 +34,7 @@ public:
 
 protected:
 	void closeEvent(QCloseEvent *e) override;
+	void changeEvent(QEvent *e) override; // 창이 뒤로 가면 미리보기 멈춤
 
 private slots:
 	void onApplySettings();
@@ -103,6 +104,7 @@ private:
 	QString m_killWhat;       // 이번 자동 저장의 종류 (킬/어시스트)
 	QString m_killLabel;      // 첫 킬 때의 게임 시간
 	QCheckBox *m_nameByClock = nullptr;
+	QComboBox *m_recQuality = nullptr;
 	QLineEdit *m_outDirEdit = nullptr;
 	struct PendingName {
 		QString label;

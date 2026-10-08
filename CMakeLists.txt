@@ -38,6 +38,7 @@ add_executable(ERShorts WIN32
   src/HudKillWatcher.h    src/HudKillWatcher.cpp
   src/GameClock.h         src/GameClock.cpp
   src/GameClockOcr.h      src/GameClockOcr.cpp
+  src/ProcessUtil.h       src/ProcessUtil.cpp
 )
 
 target_link_libraries(ERShorts PRIVATE

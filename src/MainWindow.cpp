@@ -82,6 +82,11 @@ MainWindow::~MainWindow() = default;
 
 bool MainWindow::initialize(QString *error)
 {
+	m_core->setVideoQuality(m_recQuality->currentData().toInt());
+	connect(m_recQuality, &QComboBox::currentIndexChanged, this, [this] {
+		saveSettings();
+		log("녹화 화질: " + m_recQuality->currentText() + " → 프로그램을 다시 켜면 적용돼요");
+	});
 	if (!m_core->startup(error))
 		return false;
 	refreshWindowList(); // OBS 플러그인이 올라온 뒤에 창 목록을 채움
@@ -152,6 +157,9 @@ void MainWindow::buildUi()
 	m_log->setMaximumHeight(150);
 	leftLay->addWidget(m_preview, 1);
 	leftLay->addWidget(guide);
+	auto *perfNote = new QLabel("게임 화면으로 넘어가면 이 미리보기는 잠시 멈춰요 (녹화는 계속됩니다)");
+	perfNote->setStyleSheet("color:#9a9aa5; font-size:11px;");
+	leftLay->addWidget(perfNote);
 	leftLay->addWidget(m_log);
 	splitter->addWidget(left);
 
@@ -219,6 +227,14 @@ void MainWindow::buildUi()
 	recForm->addRow("캡처 방식", m_captureMode);
 	recForm->addRow("게임 창", winRow);
 	recForm->addRow("버퍼 길이", m_bufferSec);
+	m_recQuality = new QComboBox;
+	m_recQuality->addItem("원본 해상도 · 60fps (기본, 가장 선명)", 0);
+	m_recQuality->addItem("원본 해상도 · 30fps", 1);
+	m_recQuality->addItem("1080p · 60fps (가벼움)", 2);
+	m_recQuality->addItem("1080p · 30fps (가장 가벼움)", 3);
+	m_recQuality->setToolTip("게임이 버벅이면 가벼운 설정을 고르세요. 다음 실행부터 적용됩니다.\n"
+				 "쇼츠는 1080x1920이라 1080p로도 충분하지만, 가운데를 크게 확대하는 영상은 원본이 더 선명해요.");
+	recForm->addRow("녹화 화질", m_recQuality);
 	// 저장 폴더 (클립·쇼츠·프로젝트가 이 아래 clips / shorts / projects 폴더에 저장됨)
 	m_outDirEdit = new QLineEdit;
 	m_outDirEdit->setReadOnly(true);
@@ -366,6 +382,7 @@ void MainWindow::loadSettings()
 	m_saveSound->setChecked(s.value("saveSound", false).toBool());
 	m_autoStart->setChecked(s.value("autoStart", true).toBool());
 	m_killAuto->setChecked(s.value("killAutoHud", false).toBool());
+	m_recQuality->setCurrentIndex(std::max(0, m_recQuality->findData(s.value("recQuality", 0).toInt())));
 	m_nameByClock->setChecked(s.value("nameByClock", true).toBool());
 	m_killDelay->setCurrentIndex(std::max(0, m_killDelay->findData(s.value("killDelay", 10).toInt())));
 	m_favorites = s.value("favoriteClips").toStringList();
@@ -389,6 +406,7 @@ void MainWindow::saveSettings()
 	s.setValue("saveSound", m_saveSound->isChecked());
 	s.setValue("autoStart", m_autoStart->isChecked());
 	s.setValue("killAutoHud", m_killAuto->isChecked());
+	s.setValue("recQuality", m_recQuality->currentData().toInt());
 	s.setValue("nameByClock", m_nameByClock->isChecked());
 	s.setValue("killDelay", m_killDelay->currentData().toInt());
 	s.setValue("favoriteClips", m_favorites);
@@ -799,6 +817,17 @@ void MainWindow::log(const QString &msg)
 {
 	Diagnostics::write("[앱] " + msg);
 	m_log->appendPlainText(QDateTime::currentDateTime().toString("[hh:mm:ss] ") + msg);
+}
+
+void MainWindow::changeEvent(QEvent *e)
+{
+	QMainWindow::changeEvent(e);
+	if (e->type() == QEvent::ActivationChange || e->type() == QEvent::WindowStateChange) {
+		// 게임을 하는 동안(이 창이 뒤에 있거나 최소화) 미리보기를 그리지 않아 GPU 부담을 줄임. 녹화는 계속됨
+		const bool show = isActiveWindow() && !isMinimized();
+		if (m_preview)
+			m_preview->setRendering(show);
+	}
 }
 
 void MainWindow::closeEvent(QCloseEvent *e)

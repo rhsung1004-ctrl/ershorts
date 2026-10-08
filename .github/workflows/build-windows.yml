@@ -118,7 +118,10 @@ jobs:
           Remove-Item "$dist/data/obs-studio" -Recurse -Force -ErrorAction SilentlyContinue
           Get-ChildItem "$dist/obs-plugins" -Recurse -Filter *.pdb | Remove-Item -Force
           # Qt UI를 쓰는 OBS 플러그인은 필요 없음
-          foreach ($p in 'frontend-tools','obs-websocket','decklink-captions','decklink-output-ui','aja-output-ui','obs-vst','obs-browser','obs-scripting') {
+          # 녹화(창/게임/모니터 캡처 + 소리 + 인코더 + 리플레이 버퍼)에 안 쓰는 플러그인도 빼서 시작을 빠르게, 용량을 작게
+          foreach ($p in 'frontend-tools','obs-websocket','decklink-captions','decklink-output-ui','aja-output-ui','obs-vst','obs-browser','obs-scripting',
+                         'decklink','vlc-video','obs-webrtc','rtmp-services','text-freetype2','image-source','obs-transitions',
+                         'nv-filters','win-dshow','coreaudio-encoder','obs-filters','obs-text','obs-outputs') {
             Remove-Item "$dist/obs-plugins/64bit/$p.dll" -Force -ErrorAction SilentlyContinue
             Remove-Item "$dist/data/obs-plugins/$p" -Recurse -Force -ErrorAction SilentlyContinue
           }
@@ -181,7 +184,7 @@ jobs:
             'bin/64bit/Qt6Multimedia.dll', 'bin/64bit/Qt6MultimediaWidgets.dll', 'bin/64bit/platforms/qwindows.dll',
             'bin/64bit/vcruntime140.dll', 'bin/64bit/msvcp140.dll',
             'obs-plugins/64bit/win-capture.dll', 'obs-plugins/64bit/win-wasapi.dll', 'obs-plugins/64bit/obs-ffmpeg.dll',
-            'obs-plugins/64bit/obs-x264.dll', 'obs-plugins/64bit/obs-nvenc.dll', 'obs-plugins/64bit/obs-outputs.dll',
+            'obs-plugins/64bit/obs-x264.dll', 'obs-plugins/64bit/obs-nvenc.dll', 'obs-plugins/64bit/obs-qsv11.dll',
             'data/libobs/default.effect', 'data/obs-plugins/win-capture/graphics-hook64.dll',
             'data/obs-plugins/win-capture/inject-helper64.exe', 'data/obs-plugins/win-capture/get-graphics-offsets64.exe',
             'LICENSE.txt', 'THIRD_PARTY_NOTICES.txt', 'licenses/GPL-2.0.txt', 'licenses/GPL-3.0.txt', 'licenses/LGPL-3.0.txt'
