@@ -30,7 +30,10 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QGraphicsColorizeEffect>
 #include <QGraphicsPathItem>
+#include <QGraphicsPixmapItem>
+#include <QPixmap>
 #include <QGraphicsRectItem>
 #include <QPainterPath>
 #include <QGraphicsScene>
@@ -354,6 +357,7 @@ void EditorWindow::buildUi()
 	QWidget *cards = buildCardTab();
 	cards->setParent(this);
 	cards->hide();
+	m_imageTab = m_tabs->addTab(scrollable(buildImageTab()), "이미지");
 	m_tabs->addTab(scrollable(buildExportTab()), "내보내기");
 	auto *rightPane = new QWidget;
 	auto *rightLay = new QVBoxLayout(rightPane);
@@ -584,6 +588,38 @@ QWidget *EditorWindow::buildSegmentTab()
 	zoomRow->addWidget(m_zoomPickBtn, 1);
 	zoomRow->addWidget(m_zoomScale);
 	form->addRow("줌 영역", zoomRow);
+
+	// 프리즈 프레임: 구간 마지막 장면에서 멈춤
+	auto *freezeRow = new QHBoxLayout;
+	m_freezeLen = new QComboBox;
+	m_freezeLen->addItem("없음", 0.0);
+	for (double d : {0.5, 1.0, 1.5, 2.0})
+		m_freezeLen->addItem(QString("%1초").arg(d), d);
+	m_freezeLen->setToolTip("구간이 끝나는 장면에서 화면을 멈춥니다 (킬 장면을 이 구간 끝으로 자르세요)");
+	m_freezeGray = new QCheckBox("흑백");
+	m_freezeFlash = new QCheckBox("번쩍");
+	freezeRow->addWidget(m_freezeLen);
+	freezeRow->addWidget(m_freezeGray);
+	freezeRow->addWidget(m_freezeFlash);
+	freezeRow->addStretch();
+	form->addRow("끝에서 멈춤", freezeRow);
+	connect(m_freezeLen, &QComboBox::currentIndexChanged, this, &EditorWindow::onSegmentPropsChanged);
+	connect(m_freezeGray, &QCheckBox::toggled, this, &EditorWindow::onSegmentPropsChanged);
+	connect(m_freezeFlash, &QCheckBox::toggled, this, &EditorWindow::onSegmentPropsChanged);
+
+	// 되감기 리플레이: 이 구간 뒤에 [거꾸로 빠르게] + [슬로우로 다시]를 붙임
+	auto *replayRow = new QHBoxLayout;
+	auto *replayBtn = new QPushButton("⏪ 되감기 리플레이 넣기");
+	replayBtn->setToolTip("선택한 구간의 마지막 몇 초를 거꾸로 빠르게 감은 뒤, 슬로우(0.5x)로 다시 보여 줍니다");
+	m_replayLen = new QComboBox;
+	m_replayLen->addItem("마지막 2초", 2.0);
+	m_replayLen->addItem("마지막 3초", 3.0);
+	m_replayLen->addItem("마지막 4초", 4.0);
+	m_replayLen->setCurrentIndex(1);
+	replayRow->addWidget(replayBtn, 1);
+	replayRow->addWidget(m_replayLen);
+	form->addRow("리플레이", replayRow);
+	connect(replayBtn, &QPushButton::clicked, this, &EditorWindow::insertRewindReplay);
 	connect(m_zoomPickBtn, &QPushButton::clicked, this, [this](bool on) { setZoomPick(on); });
 	connect(m_zoomScale, &QDoubleSpinBox::valueChanged, this, [this](double z) {
 		const int i = m_timeline->selectedSegment();
@@ -721,6 +757,106 @@ QWidget *EditorWindow::buildMusicTab()
 	connect(m_fxBeatShake, &QCheckBox::toggled, this, &EditorWindow::onMusicPropsChanged);
 	connect(m_fxBeatStrength, &QComboBox::currentIndexChanged, this, &EditorWindow::onMusicPropsChanged);
 	connect(m_fxBeatEvery, &QComboBox::currentIndexChanged, this, &EditorWindow::onMusicPropsChanged);
+
+	// ── 효과음 ──
+	auto *sfxBox = new QGroupBox("효과음");
+	auto *sv = new QVBoxLayout(sfxBox);
+	auto *libRow = new QHBoxLayout;
+	m_sfxLib = new QComboBox;
+	m_sfxLib->setMinimumContentsLength(14);
+	m_sfxLib->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+	auto *listenBtn = new QPushButton("▶ 듣기");
+	libRow->addWidget(m_sfxLib, 1);
+	libRow->addWidget(listenBtn);
+	sv->addLayout(libRow);
+	auto *sfxBtns = new QHBoxLayout;
+	auto *sfxHere = new QPushButton("＋ 현재 위치에 넣기");
+	auto *sfxCuts = new QPushButton("모든 컷에 넣기");
+	sfxCuts->setToolTip("구간이 바뀌는 모든 컷 위치에 고른 효과음을 넣습니다");
+	sfxBtns->addWidget(sfxHere, 1);
+	sfxBtns->addWidget(sfxCuts);
+	sv->addLayout(sfxBtns);
+	m_sfxList = new QListWidget;
+	m_sfxList->setMaximumHeight(120);
+	sv->addWidget(m_sfxList);
+	auto *sfxEdit = new QHBoxLayout;
+	m_sfxVol = new QSlider(Qt::Horizontal);
+	m_sfxVol->setRange(0, 200);
+	auto *sfxDel = new QPushButton("삭제");
+	sfxEdit->addWidget(new QLabel("선택한 효과음 볼륨"));
+	sfxEdit->addWidget(m_sfxVol, 1);
+	sfxEdit->addWidget(sfxDel);
+	sv->addLayout(sfxEdit);
+	sv->addWidget(helpLabel("목록의 '＋ 효과음 파일 추가…'로 mp3·wav 파일을 넣어 두면 다음에도 바로 쓸 수 있어요. "
+				"타임라인 음악 줄의 주황색 표시가 효과음 위치입니다. 효과음 파일의 사용 조건은 직접 확인하세요."));
+	lay->addWidget(sfxBox);
+	refreshSfxLibrary();
+
+	connect(m_sfxLib, &QComboBox::activated, this, [this] {
+		if (m_sfxLib->currentData().toString() != "__add__")
+			return;
+		const QStringList files = QFileDialog::getOpenFileNames(this, "효과음 파일 추가", QString(),
+									"소리 파일 (*.wav *.mp3 *.ogg *.m4a *.flac *.aac)");
+		const QString dir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/ERShorts/sfx";
+		QDir().mkpath(dir);
+		QString last;
+		for (const QString &f : files) {
+			const QString dest = dir + "/" + QFileInfo(f).fileName();
+			if (QFileInfo(dest).absoluteFilePath() != QFileInfo(f).absoluteFilePath() && !QFile::exists(dest))
+				QFile::copy(f, dest);
+			last = dest;
+		}
+		refreshSfxLibrary(last);
+	});
+	connect(listenBtn, &QPushButton::clicked, this, [this] {
+		const QString path = m_sfxLib->currentData().toString();
+		if (path.isEmpty() || path == "__add__")
+			return;
+		SfxPlayer &sp = m_sfxPlayers[path];
+		if (!sp.player) {
+			sp.player = new QMediaPlayer(this);
+			sp.audio = new QAudioOutput(this);
+			sp.player->setAudioOutput(sp.audio);
+			sp.player->setSource(QUrl::fromLocalFile(path));
+		}
+		sp.audio->setVolume(1.0f);
+		sp.player->setPosition(0);
+		sp.player->play();
+	});
+	connect(sfxHere, &QPushButton::clicked, this, [this] { addSfxAt({position()}); });
+	connect(sfxCuts, &QPushButton::clicked, this, [this] {
+		QVector<double> cuts;
+		for (int k = 1; k < m_project.segments.size(); ++k)
+			cuts << m_project.segmentStart(k);
+		if (cuts.isEmpty())
+			log("컷이 없어요 (구간이 2개 이상일 때 쓸 수 있어요)");
+		else
+			addSfxAt(cuts);
+	});
+	connect(m_sfxList, &QListWidget::currentRowChanged, this, [this](int row) {
+		if (!m_syncing)
+			selectSfx(row);
+	});
+	connect(m_sfxVol, &QSlider::valueChanged, this, [this](int v) {
+		const int i = m_sfxList->currentRow();
+		if (m_syncing || i < 0 || i >= m_project.sfx.size())
+			return;
+		m_project.sfx[i].volume = v / 100.0;
+		m_syncing = true;
+		refreshSfxList();
+		m_sfxList->setCurrentRow(i);
+		m_syncing = false;
+		projectChanged();
+	});
+	connect(sfxDel, &QPushButton::clicked, this, [this] {
+		const int i = m_sfxList->currentRow();
+		if (i < 0 || i >= m_project.sfx.size())
+			return;
+		m_project.sfx.removeAt(i);
+		refreshSfxList();
+		selectSfx(std::min(i, int(m_project.sfx.size()) - 1));
+		projectChanged();
+	});
 	lay->addStretch();
 
 	connect(pickBtn, &QPushButton::clicked, this, &EditorWindow::chooseMusic);
@@ -1473,6 +1609,13 @@ QSize EditorWindow::activeSourceSize() const
 
 EditorWindow::DragKind EditorWindow::previewHit(const QPointF &p, int *subIndex) const
 {
+	// 맨 위에 그려지는 이미지부터
+	for (int i = int(m_imgItems.size()) - 1; i >= 0; --i) {
+		if (m_imgItems[i] && m_imgItems[i]->isVisible() && m_imgItems[i]->sceneBoundingRect().contains(p)) {
+			*subIndex = i;
+			return DragKind::Image;
+		}
+	}
 	// 위에 그려진 자막부터 확인
 	for (int i = int(m_subVisuals.size()) - 1; i >= 0; --i) {
 		const SubVisual &v = m_subVisuals[i];
@@ -1582,7 +1725,12 @@ bool EditorWindow::eventFilter(QObject *obj, QEvent *e)
 		m_dragSub = sub;
 		m_dragStartY = sp.y();
 		m_dragMoved = false;
-		if (k == DragKind::Subtitle) {
+		if (k == DragKind::Image) {
+			selectImage(sub);
+			m_tabs->setCurrentIndex(m_imageTab);
+			m_dragAnchor = sp;
+			m_dragStartRect = QRectF(m_project.images[sub].x, m_project.images[sub].y, 0, 0);
+		} else if (k == DragKind::Subtitle) {
 			selectSubtitle(sub);
 			m_tabs->setCurrentIndex(3);
 			m_dragStartValue = m_project.subtitles[sub].y;
@@ -1598,8 +1746,20 @@ bool EditorWindow::eventFilter(QObject *obj, QEvent *e)
 		if (m_drag == DragKind::None) {
 			int sub = -1;
 			const DragKind k = previewHit(sp, &sub);
-			m_view->viewport()->setCursor(k == DragKind::None ? Qt::ArrowCursor : Qt::SizeVerCursor);
+			m_view->viewport()->setCursor(k == DragKind::None    ? Qt::ArrowCursor
+						      : k == DragKind::Image ? Qt::SizeAllCursor
+									     : Qt::SizeVerCursor);
 			break;
+		}
+		if (m_drag == DragKind::Image) { // 이미지: 자유롭게 이동
+			if (m_dragSub < 0 || m_dragSub >= m_project.images.size())
+				return true;
+			ImageOverlay &im = m_project.images[m_dragSub];
+			im.x = std::clamp(m_dragStartRect.x() + (sp.x() - m_dragAnchor.x()) / kCanvasW, 0.0, 1.0);
+			im.y = std::clamp(m_dragStartRect.y() + (sp.y() - m_dragAnchor.y()) / kCanvasH, 0.0, 1.0);
+			rebuildImageVisuals();
+			projectChanged();
+			return true;
 		}
 		const double dy = sp.y() - m_dragStartY;
 		if (std::abs(dy) > 2)
@@ -1656,7 +1816,16 @@ bool EditorWindow::eventFilter(QObject *obj, QEvent *e)
 		auto *we = static_cast<QWheelEvent *>(e);
 		const QPointF sp = m_view->mapToScene(we->position().toPoint());
 		int sub = -1;
-		if (previewHit(sp, &sub) != DragKind::Video || we->angleDelta().y() == 0)
+		const DragKind hit = previewHit(sp, &sub);
+		if (hit == DragKind::Image && we->angleDelta().y() != 0) { // 이미지 위 휠 = 크기
+			ImageOverlay &im = m_project.images[sub];
+			im.width = std::clamp(im.width * (we->angleDelta().y() > 0 ? 1.1 : 1.0 / 1.1), 0.02, 1.0);
+			selectImage(sub);
+			rebuildImageVisuals();
+			projectChanged();
+			return true;
+		}
+		if (hit != DragKind::Video || we->angleDelta().y() == 0)
 			break;
 		const double step = we->angleDelta().y() > 0 ? 0.05 : -0.05;
 		const double z = std::clamp(std::round((m_project.bands.zoom + step) * 100.0) / 100.0, 1.0, 2.0);
@@ -1675,6 +1844,340 @@ bool EditorWindow::eventFilter(QObject *obj, QEvent *e)
 		break;
 	}
 	return QMainWindow::eventFilter(obj, e);
+}
+
+// ═════════════════════════════════════════════════════════════
+// 되감기 리플레이
+// ═════════════════════════════════════════════════════════════
+void EditorWindow::insertRewindReplay()
+{
+	const int i = m_timeline->selectedSegment();
+	if (i < 0 || i >= m_project.segments.size()) {
+		log("먼저 타임라인에서 리플레이할 구간을 선택하세요");
+		return;
+	}
+	const Segment base = m_project.segments[i];
+	if (base.reverse) {
+		log("되감기 구간에는 리플레이를 넣을 수 없어요. 원래 장면 구간을 선택하세요.");
+		return;
+	}
+	const double len = std::min(m_replayLen->currentData().toDouble(), base.srcLength());
+	if (len < 0.3) {
+		log("구간이 너무 짧아요 (0.3초 이상 필요)");
+		return;
+	}
+	auto plain = [&](Segment s) {
+		s.in = base.out - len;
+		s.out = base.out;
+		s.rampIn = s.rampOut = false;
+		s.freeze = 0.0;
+		return s;
+	};
+	Segment rewind = plain(base); // 거꾸로 빠르게 감기
+	rewind.reverse = true;
+	rewind.speed = 3.0;
+	rewind.transIn = Transition::None;
+	Segment replay = plain(base); // 슬로우로 다시
+	replay.speed = 0.5;
+	replay.transIn = Transition::Flash;
+
+	m_project.segments.insert(i + 1, rewind);
+	m_project.segments.insert(i + 2, replay);
+	projectChanged();
+	selectSegment(i + 1);
+	seek(std::max(0.0, m_project.segmentStart(i + 1) - 1.0));
+	log(QString("되감기 리플레이 추가: 마지막 %1초를 거꾸로 3배속 → 0.5배속으로 다시").arg(len, 0, 'f', 1));
+}
+
+// ═════════════════════════════════════════════════════════════
+// 효과음
+// ═════════════════════════════════════════════════════════════
+void EditorWindow::refreshSfxLibrary(const QString &select)
+{
+	const QString keep = select.isEmpty() ? m_sfxLib->currentData().toString() : select;
+	const QString dir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/ERShorts/sfx";
+	m_sfxLib->blockSignals(true);
+	m_sfxLib->clear();
+	const QFileInfoList files = QDir(dir).entryInfoList(
+		{"*.wav", "*.mp3", "*.ogg", "*.m4a", "*.flac", "*.aac", "*.WAV", "*.MP3"}, QDir::Files, QDir::Name);
+	for (const QFileInfo &fi : files)
+		m_sfxLib->addItem("🔊 " + fi.completeBaseName(), fi.absoluteFilePath());
+	m_sfxLib->addItem("＋ 효과음 파일 추가…", QString("__add__"));
+	const int idx = m_sfxLib->findData(keep);
+	m_sfxLib->setCurrentIndex(idx >= 0 && keep != "__add__" ? idx : 0);
+	m_sfxLib->blockSignals(false);
+}
+
+void EditorWindow::addSfxAt(const QVector<double> &times)
+{
+	const QString path = m_sfxLib->currentData().toString();
+	if (path.isEmpty() || path == "__add__") {
+		log("먼저 '＋ 효과음 파일 추가…'로 효과음을 넣고 목록에서 고르세요");
+		return;
+	}
+	int added = 0, last = -1;
+	for (double t : times) {
+		bool dup = false;
+		for (const SoundFx &f : m_project.sfx)
+			dup = dup || (f.path == path && std::abs(f.start - t) < 0.05);
+		if (dup)
+			continue;
+		SoundFx f;
+		f.start = std::max(0.0, t);
+		f.path = path;
+		m_project.sfx.push_back(f);
+		++added;
+	}
+	std::sort(m_project.sfx.begin(), m_project.sfx.end(),
+		  [](const SoundFx &a, const SoundFx &b) { return a.start < b.start; });
+	for (int k = 0; k < m_project.sfx.size(); ++k)
+		if (m_project.sfx[k].path == path && std::abs(m_project.sfx[k].start - times.last()) < 0.05)
+			last = k;
+	refreshSfxList();
+	if (last >= 0) {
+		m_syncing = true;
+		m_sfxList->setCurrentRow(last);
+		m_syncing = false;
+		selectSfx(last);
+	}
+	if (added > 0) {
+		projectChanged();
+		log(QString("효과음 %1개 추가: %2").arg(added).arg(QFileInfo(path).completeBaseName()));
+	}
+}
+
+void EditorWindow::refreshSfxList()
+{
+	const bool prev = m_syncing;
+	m_syncing = true;
+	const int row = m_sfxList->currentRow();
+	m_sfxList->clear();
+	for (const SoundFx &f : m_project.sfx)
+		m_sfxList->addItem(QString("%1   🔊 %2   (%3%)")
+					   .arg(fmt(f.start), f.name())
+					   .arg(int(std::lround(f.volume * 100))));
+	if (row >= 0 && row < m_sfxList->count())
+		m_sfxList->setCurrentRow(row);
+	m_syncing = prev;
+	m_timeline->update();
+}
+
+void EditorWindow::selectSfx(int i)
+{
+	if (i < 0 || i >= m_project.sfx.size())
+		return;
+	m_syncing = true;
+	m_sfxList->setCurrentRow(i);
+	m_sfxVol->setValue(int(std::lround(m_project.sfx[i].volume * 100)));
+	m_syncing = false;
+	if (!m_playing)
+		seek(m_project.sfx[i].start);
+}
+
+void EditorWindow::triggerSfx(double from, double to)
+{
+	if (to <= from || to - from > 0.5) // 건너뛰었거나 멈춰 있으면 울리지 않음
+		return;
+	for (const SoundFx &f : m_project.sfx) {
+		if (!(f.start > from && f.start <= to))
+			continue;
+		SfxPlayer &sp = m_sfxPlayers[f.path];
+		if (!sp.player) {
+			sp.player = new QMediaPlayer(this);
+			sp.audio = new QAudioOutput(this);
+			sp.player->setAudioOutput(sp.audio);
+			sp.player->setSource(QUrl::fromLocalFile(f.path));
+		}
+		sp.audio->setVolume(float(std::min(1.0, f.volume)));
+		sp.player->setPosition(0);
+		sp.player->play();
+	}
+}
+
+// ═════════════════════════════════════════════════════════════
+// 이미지 (로고·스티커)
+// ═════════════════════════════════════════════════════════════
+QWidget *EditorWindow::buildImageTab()
+{
+	auto *w = new QWidget;
+	auto *lay = new QVBoxLayout(w);
+	m_imgList = new QListWidget;
+	m_imgList->setMaximumHeight(150);
+	lay->addWidget(m_imgList);
+	auto *btns = new QHBoxLayout;
+	auto *addBtn = new QPushButton("＋ 이미지 추가 (PNG/JPG)");
+	auto *delBtn = new QPushButton("삭제");
+	btns->addWidget(addBtn, 1);
+	btns->addWidget(delBtn);
+	lay->addLayout(btns);
+
+	auto *box = new QGroupBox("선택한 이미지");
+	m_imgProps = box;
+	auto *f = new QFormLayout(box);
+	m_imgWhole = new QCheckBox("영상 전체에 표시 (채널 로고·워터마크)");
+	f->addRow(m_imgWhole);
+	auto timeRow = [this](QDoubleSpinBox *&spin) {
+		auto *row = new QHBoxLayout;
+		spin = new QDoubleSpinBox;
+		spin->setDecimals(2);
+		spin->setSingleStep(0.1);
+		spin->setSuffix(" 초");
+		spin->setRange(0, 3600);
+		auto *now = new QPushButton("현재 위치");
+		row->addWidget(spin, 1);
+		row->addWidget(now);
+		QDoubleSpinBox *target = spin;
+		connect(now, &QPushButton::clicked, this, [this, target] { target->setValue(position()); });
+		return row;
+	};
+	f->addRow("시작", timeRow(m_imgStart));
+	f->addRow("끝", timeRow(m_imgEnd));
+	m_imgSize = new QSlider(Qt::Horizontal);
+	m_imgSize->setRange(2, 100);
+	f->addRow("크기", m_imgSize);
+	m_imgOpacity = new QSlider(Qt::Horizontal);
+	m_imgOpacity->setRange(5, 100);
+	f->addRow("불투명도", m_imgOpacity);
+	lay->addWidget(box);
+	lay->addWidget(helpLabel("미리보기에서 이미지를 끌어 위치를 옮기고, 이미지 위에서 휠을 굴려 크기를 바꿀 수 있어요. "
+				 "배경이 투명한 PNG를 쓰면 스티커처럼 보입니다."));
+	lay->addStretch();
+	m_imgProps->setEnabled(false);
+
+	connect(addBtn, &QPushButton::clicked, this, &EditorWindow::addImage);
+	connect(delBtn, &QPushButton::clicked, this, &EditorWindow::deleteSelectedImage);
+	connect(m_imgList, &QListWidget::currentRowChanged, this, [this](int row) {
+		if (!m_syncing)
+			selectImage(row);
+	});
+	connect(m_imgWhole, &QCheckBox::toggled, this, &EditorWindow::onImagePropsChanged);
+	connect(m_imgStart, &QDoubleSpinBox::valueChanged, this, &EditorWindow::onImagePropsChanged);
+	connect(m_imgEnd, &QDoubleSpinBox::valueChanged, this, &EditorWindow::onImagePropsChanged);
+	connect(m_imgSize, &QSlider::valueChanged, this, &EditorWindow::onImagePropsChanged);
+	connect(m_imgOpacity, &QSlider::valueChanged, this, &EditorWindow::onImagePropsChanged);
+	return w;
+}
+
+void EditorWindow::addImage()
+{
+	const QString path = QFileDialog::getOpenFileName(this, "이미지 추가", QString(),
+							  "이미지 (*.png *.jpg *.jpeg *.webp *.bmp)");
+	if (path.isEmpty())
+		return;
+	if (QPixmap(path).isNull()) {
+		log("이미지를 읽을 수 없어요: " + QFileInfo(path).fileName());
+		return;
+	}
+	ImageOverlay im;
+	im.path = path;
+	if (!m_project.images.isEmpty()) // 두 번째부터는 스티커: 가운데, 2초 동안
+		im.whole = false, im.x = 0.5, im.y = 0.5, im.width = 0.4;
+	im.start = position();
+	im.end = std::min(position() + 2.0, std::max(position() + 0.5, m_project.totalDuration()));
+	m_project.images.push_back(im);
+	refreshImageList();
+	rebuildImageVisuals();
+	selectImage(int(m_project.images.size()) - 1);
+	projectChanged();
+}
+
+void EditorWindow::deleteSelectedImage()
+{
+	const int i = m_imgList->currentRow();
+	if (i < 0 || i >= m_project.images.size())
+		return;
+	m_project.images.removeAt(i);
+	refreshImageList();
+	rebuildImageVisuals();
+	selectImage(std::min(i, int(m_project.images.size()) - 1));
+	projectChanged();
+}
+
+void EditorWindow::refreshImageList()
+{
+	const bool prev = m_syncing;
+	m_syncing = true;
+	const int row = m_imgList->currentRow();
+	m_imgList->clear();
+	for (const ImageOverlay &im : m_project.images)
+		m_imgList->addItem(QString("🖼 %1   %2")
+					   .arg(QFileInfo(im.path).completeBaseName(),
+						im.whole ? QString("(영상 전체)") : fmt(im.start) + " – " + fmt(im.end)));
+	if (row >= 0 && row < m_imgList->count())
+		m_imgList->setCurrentRow(row);
+	m_syncing = prev;
+}
+
+void EditorWindow::selectImage(int i)
+{
+	if (i >= m_project.images.size())
+		i = -1;
+	m_imgProps->setEnabled(i >= 0);
+	m_syncing = true;
+	m_imgList->setCurrentRow(i);
+	if (i >= 0) {
+		const ImageOverlay &im = m_project.images[i];
+		m_imgWhole->setChecked(im.whole);
+		m_imgStart->setValue(im.start);
+		m_imgEnd->setValue(im.end);
+		m_imgStart->setEnabled(!im.whole);
+		m_imgEnd->setEnabled(!im.whole);
+		m_imgSize->setValue(int(std::lround(im.width * 100)));
+		m_imgOpacity->setValue(int(std::lround(im.opacity * 100)));
+	}
+	m_syncing = false;
+}
+
+void EditorWindow::onImagePropsChanged()
+{
+	const int i = m_imgList->currentRow();
+	if (m_syncing || i < 0 || i >= m_project.images.size())
+		return;
+	ImageOverlay &im = m_project.images[i];
+	im.whole = m_imgWhole->isChecked();
+	im.start = m_imgStart->value();
+	im.end = std::max(m_imgEnd->value(), im.start + 0.1);
+	im.width = m_imgSize->value() / 100.0;
+	im.opacity = m_imgOpacity->value() / 100.0;
+	m_imgStart->setEnabled(!im.whole);
+	m_imgEnd->setEnabled(!im.whole);
+	refreshImageList();
+	rebuildImageVisuals();
+	projectChanged();
+}
+
+void EditorWindow::rebuildImageVisuals()
+{
+	// 이미지 파일은 경로별로 한 번만 읽어 둠 (끌어서 옮길 때 다시 읽지 않게)
+	static QHash<QString, QPixmap> cache;
+	while (m_imgItems.size() > m_project.images.size())
+		delete m_imgItems.takeLast();
+	while (m_imgItems.size() < m_project.images.size()) {
+		auto *item = new QGraphicsPixmapItem(m_canvas);
+		item->setTransformationMode(Qt::SmoothTransformation);
+		item->setZValue(12);
+		m_imgItems.push_back(item);
+	}
+	for (int i = 0; i < m_project.images.size(); ++i) {
+		const ImageOverlay &im = m_project.images[i];
+		auto it = cache.find(im.path);
+		if (it == cache.end())
+			it = cache.insert(im.path, QPixmap(im.path));
+		QGraphicsPixmapItem *item = m_imgItems[i];
+		if (item->pixmap().cacheKey() != it->cacheKey())
+			item->setPixmap(*it);
+		if (it->isNull()) {
+			item->setVisible(false);
+			continue;
+		}
+		const double w = kCanvasW * im.width;
+		const double k = w / it->width();
+		const double h = it->height() * k;
+		item->setScale(k);
+		item->setPos(im.x * kCanvasW - w / 2, im.y * kCanvasH - h / 2);
+		item->setOpacity(im.opacity);
+		item->setVisible(im.visibleAt(position()));
+	}
 }
 
 void EditorWindow::setupShortcuts()
@@ -1788,6 +2291,9 @@ void EditorWindow::loadUiFromProject(bool keepPosition)
 
 	refreshClipList();
 	refreshSubtitleList();
+	refreshSfxList();
+	refreshImageList();
+	rebuildImageVisuals();
 	applyLayoutToPreview();
 	rebuildSubtitleVisuals();
 	if (keepPosition) {
@@ -1915,6 +2421,7 @@ void EditorWindow::play()
 	m_playStart = m_pos;
 	m_clock.start();
 	m_playing = true;
+	m_lastTick = m_pos - 0.001; // 시작 위치에 있는 효과음도 울리게
 	m_activeSeg = -1;
 	m_timeline->setFollowPlayhead(true);
 	m_playBtn->setText("⏸ 일시정지");
@@ -1945,6 +2452,7 @@ void EditorWindow::seek(double t)
 		m_activeSeg = -1;
 	}
 	syncPlayers(t, m_playing);
+	m_lastTick = t; // 건너뛴 구간의 효과음은 울리지 않음
 	m_timeline->setPosition(t);
 	updateOverlays(t);
 	updateTimeLabel(t);
@@ -1959,8 +2467,11 @@ void EditorWindow::tick()
 		pause();
 		t = m_pos;
 	}
-	if (m_playing)
+	if (m_playing) {
 		syncPlayers(t, true);
+		triggerSfx(m_lastTick, t);
+	}
+	m_lastTick = t;
 	m_timeline->setPosition(t);
 	updateOverlays(t);
 	updateTimeLabel(t);
@@ -1989,10 +2500,15 @@ void EditorWindow::syncPlayers(double t, bool playing)
 		SourcePlayer &sp = m_players[wantSource];
 		sp.item->setVisible(true);
 		sp.audio->setVolume(float(std::min(1.0, m_project.gameVolume)));
-		const qint64 expected = qint64(loc.srcTime * 1000.0);
+		// 마지막 프레임을 넘어가면 검은 화면이 될 수 있어 살짝 안쪽으로
+		const double srcT = std::clamp(loc.srcTime, seg.in, std::max(seg.in, seg.out - 0.03));
+		const qint64 expected = qint64(srcT * 1000.0);
 		const qint64 drift = std::llabs(sp.player->position() - expected);
+		// 거꾸로 재생·멈춤 구간은 플레이어를 세워 두고 위치만 맞춤 (거꾸로는 장면을 넘기며 흉내)
+		const bool frozen = seg.freeze > 0 && loc.local >= seg.movingDuration();
+		const bool stepping = seg.reverse || frozen;
 
-		if (playing) {
+		if (playing && !stepping) {
 			// 속도 램프 중에는 재생 속도가 계속 바뀜
 			const double rate = seg.speedAt(loc.srcTime - seg.in);
 			if (std::abs(sp.player->playbackRate() - rate) > 0.02)
@@ -2013,7 +2529,7 @@ void EditorWindow::syncPlayers(double t, bool playing)
 		} else {
 			if (sp.player->playbackState() == QMediaPlayer::PlayingState)
 				sp.player->pause();
-			if (drift > 15)
+			if (drift > (seg.reverse && playing ? 40 : 15))
 				sp.player->setPosition(expected);
 		}
 		m_activeSeg = loc.seg;
@@ -2222,6 +2738,29 @@ void EditorWindow::updateOverlays(double t)
 	const auto loc = m_project.locate(t);
 	updateZoomOverlay();
 
+	// 이미지 (로고·스티커)
+	for (int i = 0; i < m_imgItems.size() && i < m_project.images.size(); ++i)
+		if (m_imgItems[i])
+			m_imgItems[i]->setVisible(m_project.images[i].visibleAt(t));
+
+	// 멈춤(프리즈) 구간의 흑백: 해당 클립 영상에만 흑백 효과
+	int graySrc = -1;
+	if (loc.kind == EditProject::Locate::Segment) {
+		const Segment &sg = m_project.segments[loc.seg];
+		if (sg.freeze > 0 && sg.freezeGray && loc.local >= sg.movingDuration())
+			graySrc = sg.source;
+	}
+	if (graySrc >= 0 && graySrc < m_players.size() && !m_grayFx.contains(graySrc)) {
+		auto *fx = new QGraphicsColorizeEffect;
+		fx->setColor(Qt::black); // 회색으로 바꾼 뒤 검은색을 섞으면 그대로 흑백
+		fx->setStrength(1.0);
+		m_players[graySrc].item->setGraphicsEffect(fx); // 아이템이 소유
+		m_grayFx.insert(graySrc, fx);
+	}
+	for (auto it = m_grayFx.begin(); it != m_grayFx.end(); ++it)
+		if (it.value()->isEnabled() != (it.key() == graySrc))
+			it.value()->setEnabled(it.key() == graySrc);
+
 	// 자막
 	for (int i = 0; i < m_subVisuals.size() && i < m_project.subtitles.size(); ++i) {
 		const Subtitle &s = m_project.subtitles[i];
@@ -2286,6 +2825,12 @@ void EditorWindow::updateOverlays(double t)
 		break;
 	case Transition::None:
 		break;
+	}
+	if (seg.freeze > 0 && seg.freezeFlash && local >= seg.movingDuration() &&
+	    local - seg.movingDuration() < 0.25) { // 멈추는 순간 번쩍
+		m_flashOverlay->setBrush(Qt::white);
+		m_flashOverlay->setOpacity(0.6 * (1.0 - (local - seg.movingDuration()) / 0.25));
+		m_flashOverlay->setVisible(true);
 	}
 	if (loc.seg + 1 < m_project.segments.size() &&
 	    m_project.segments[loc.seg + 1].transIn == Transition::BlackDip && dur - local < 0.15) {
@@ -2528,7 +3073,18 @@ void EditorWindow::selectSegment(int i)
 	m_rampIn->setChecked(s.rampIn);
 	m_rampOut->setChecked(s.rampOut);
 	m_rampLen->setValue(s.rampLen);
-	const bool canRamp = std::abs(s.speed - 1.0) > 0.01;
+	{
+		int fi = 0;
+		for (int k = 0; k < m_freezeLen->count(); ++k)
+			if (std::abs(m_freezeLen->itemData(k).toDouble() - s.freeze) < 0.01)
+				fi = k;
+		m_freezeLen->setCurrentIndex(fi);
+	}
+	m_freezeGray->setChecked(s.freezeGray);
+	m_freezeFlash->setChecked(s.freezeFlash);
+	m_freezeGray->setEnabled(s.freeze > 0);
+	m_freezeFlash->setEnabled(s.freeze > 0);
+	const bool canRamp = std::abs(s.speed - 1.0) > 0.01 && !s.reverse;
 	m_rampIn->setEnabled(canRamp);
 	m_rampOut->setEnabled(canRamp);
 	m_rampLen->setEnabled(canRamp);
@@ -2551,6 +3107,9 @@ void EditorWindow::onSegmentPropsChanged()
 	s.rampIn = m_rampIn->isChecked();
 	s.rampOut = m_rampOut->isChecked();
 	s.rampLen = m_rampLen->value();
+	s.freeze = m_freezeLen->currentData().toDouble();
+	s.freezeGray = m_freezeGray->isChecked();
+	s.freezeFlash = m_freezeFlash->isChecked();
 	selectSegment(i);
 	projectChanged();
 	seek(position());
@@ -2790,7 +3349,7 @@ void EditorWindow::onExport(bool previewQuality)
 	m_project.save();
 	(previewQuality ? m_previewExportBtn : m_exportBtn)->setText("취소");
 	(previewQuality ? m_exportBtn : m_previewExportBtn)->setEnabled(false);
-	m_tabs->setCurrentIndex(5);
+	m_tabs->setCurrentIndex(m_tabs->count() - 1); // 내보내기 탭
 	m_exporter->start(m_project, out, previewQuality);
 }
 

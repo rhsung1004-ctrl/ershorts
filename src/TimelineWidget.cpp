@@ -230,9 +230,26 @@ void TimelineWidget::paintEvent(QPaintEvent *)
 	if (m_p->intro.enabled)
 		drawCard(0, m_p->introDuration(), "인트로");
 
+	// 앞부분을 자르는 중에는 선택 구간의 뒤쪽 끝(과 그 뒤 구간들)을 제자리에 두고 앞쪽만 움직여 보여 줌
+	// → 손을 놓으면 앞으로 당겨짐
+	const bool trimmingIn = (m_drag == Drag::SegIn && m_selSeg >= 0 && m_selSeg < m_p->segments.size());
+	if (trimmingIn && m_trimShift > 1e-4) { // 잘려 나가는 부분
+		const double os = m_p->segmentStart(m_selSeg);
+		QRectF cut(timeToX(os), vr.top() + 1, timeToX(os + m_trimShift) - timeToX(os), vr.height() - 2);
+		p.setPen(Qt::NoPen);
+		p.setBrush(QColor(229, 72, 77, 70));
+		p.drawRoundedRect(cut, 4, 4);
+		p.setBrush(QBrush(QColor(229, 72, 77, 160), Qt::BDiagPattern));
+		p.drawRoundedRect(cut, 4, 4);
+		if (cut.width() > 30) {
+			p.setPen(QColor("#FFB4B6"));
+			p.drawText(cut, Qt::AlignCenter, cut.width() > 70 ? "✂ 잘림" : "✂");
+		}
+	}
+
 	for (int i = 0; i < m_p->segments.size(); ++i) {
 		const Segment &s = m_p->segments[i];
-		const double st = m_p->segmentStart(i);
+		const double st = m_p->segmentStart(i) + (trimmingIn && i >= m_selSeg ? m_trimShift : 0.0);
 		QRectF r(timeToX(st), vr.top(), timeToX(st + s.outDuration()) - timeToX(st), vr.height());
 		r.adjust(1, 1, -1, -1);
 		if (r.width() < 1)
@@ -261,13 +278,22 @@ void TimelineWidget::paintEvent(QPaintEvent *)
 			const double firstX = inner.left() + std::floor((x0 - inner.left()) / tileW) * tileW;
 			for (double x = firstX; x < std::min(inner.right(), double(width())); x += tileW) {
 				const double tLocal = xToTime(x + tileW / 2) - st;
-				const double src = s.in + s.outToSrc(std::clamp(tLocal, 0.0, s.outDuration()));
+				const double src = s.in + s.srcAt(std::clamp(tLocal, 0.0, s.outDuration()));
 				const QImage img = m_thumbs->frameAt(path, src);
 				if (!img.isNull())
 					p.drawImage(QRectF(x, inner.top(), tileW, inner.height()), img);
 			}
 			p.fillRect(inner, QColor(0, 0, 0, 60)); // 글자가 잘 보이도록 살짝 어둡게
 			p.restore();
+		}
+
+		if (s.freeze > 0) { // 멈춤 구간: 끝부분을 밝게 + 눈송이
+			const double fx = timeToX(st + s.movingDuration());
+			QRectF fr(std::max(fx, r.left()), r.top(), r.right() - std::max(fx, r.left()), r.height());
+			p.fillRect(fr, QColor(255, 255, 255, 70));
+			p.setPen(QColor("#E8F4FF"));
+			if (fr.width() > 14)
+				p.drawText(fr, Qt::AlignCenter, fr.width() > 44 ? "❄ 멈춤" : "❄");
 		}
 
 		QStringList parts;
@@ -345,6 +371,21 @@ void TimelineWidget::paintEvent(QPaintEvent *)
 		p.drawText(mr.adjusted(6, 0, 0, 0), Qt::AlignVCenter | Qt::AlignLeft, "♪ BGM 없음 (음악 탭에서 추가)");
 	}
 
+	// 효과음 위치 (음악 줄 위 주황색 표시)
+	for (const SoundFx &f : m_p->sfx) {
+		const double x = timeToX(f.start);
+		if (x < kMargin - 8 || x > width())
+			continue;
+		p.setPen(QPen(QColor("#FF8A3D"), 2));
+		p.drawLine(QPointF(x, mr.top()), QPointF(x, mr.bottom()));
+		QPainterPath tri;
+		tri.moveTo(x - 5, mr.top());
+		tri.lineTo(x + 5, mr.top());
+		tri.lineTo(x, mr.top() + 7);
+		tri.closeSubpath();
+		p.fillPath(tri, QColor("#FF8A3D"));
+	}
+
 	// ── 자막 줄 ───────────────────
 	const QRect tr = subRect();
 	p.fillRect(tr, QColor("#202026"));
@@ -361,7 +402,7 @@ void TimelineWidget::paintEvent(QPaintEvent *)
 	}
 
 	// ── 재생 위치 ─────────────────
-	const double px = timeToX(m_pos);
+	const double px = timeToX(m_pos + (trimmingIn && m_pos >= m_p->segmentStart(m_selSeg) - 1e-6 ? m_trimShift : 0.0));
 	p.setPen(QPen(QColor("#FF4D4F"), 2));
 	p.drawLine(QPointF(px, ruler.top()), QPointF(px, tr.bottom()));
 	QPainterPath tri;
@@ -386,6 +427,8 @@ void TimelineWidget::mousePressEvent(QMouseEvent *e)
 		if (nearEdge(pos.x(), &isIn)) {
 			m_drag = isIn ? Drag::SegIn : Drag::SegOut;
 			m_origIn = m_p->segments[m_selSeg].in;
+			m_origOutDur = m_p->segments[m_selSeg].outDuration();
+			m_trimShift = 0.0;
 			return;
 		}
 		const auto loc = m_p->locate(t);
@@ -467,6 +510,7 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent *e)
 		const double start = m_p->segmentStart(m_selSeg);
 		// 앞쪽 끝을 오른쪽으로 끌면 앞부분이 잘리고, 왼쪽으로 끌면 다시 늘어남
 		s.in = std::clamp(m_origIn + (t - xToTime(m_pressX)) * s.speed, 0.0, s.out - 0.2 * s.speed);
+		m_trimShift = m_origOutDur - s.outDuration(); // 뒤쪽 끝은 그대로 보이게
 		emit seekRequested(start);
 		update();
 		break;
@@ -491,6 +535,7 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent *)
 		emit segmentsEdited();
 	}
 	m_drag = Drag::None;
+	m_trimShift = 0.0;
 	m_fixedViewDuration = 0.0;
 	setCursor(Qt::ArrowCursor);
 	update();

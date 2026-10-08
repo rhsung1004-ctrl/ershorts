@@ -9,6 +9,7 @@
 #include <cmath>
 
 QString SourceClip::name() const { return QFileInfo(path).completeBaseName(); }
+QString SoundFx::name() const { return QFileInfo(path).completeBaseName(); }
 
 QString transitionName(Transition t)
 {
@@ -35,7 +36,7 @@ bool Segment::hasRamp() const
 void Segment::rampLengths(double *ra, double *rb) const
 {
 	*ra = *rb = 0.0;
-	if (std::abs(speed - 1.0) < 1e-3)
+	if (std::abs(speed - 1.0) < 1e-3 || reverse)
 		return;
 	const double L = srcLength();
 	const double lim = (rampIn && rampOut) ? L / 2 : L;
@@ -122,6 +123,8 @@ QStringList Segment::effectNames() const
 	if (gray) n << "흑백";
 	if (vivid) n << "선명";
 	if (vignette) n << "비네팅";
+	if (reverse) n << "◀◀ 되감기";
+	if (freeze > 0) n << QString("멈춤 %1초").arg(freeze, 0, 'g', 2);
 	if (hasRamp())
 		n << QStringLiteral("램프") + (rampIn ? QStringLiteral("↘") : QString()) + (rampOut ? QStringLiteral("↗") : QString());
 	return n;
@@ -202,7 +205,7 @@ EditProject::Locate EditProject::locate(double t) const
 			r.kind = Locate::Segment;
 			r.seg = i;
 			r.local = t - acc;
-			r.srcTime = segments[i].in + segments[i].outToSrc(r.local);
+			r.srcTime = segments[i].in + segments[i].srcAt(r.local);
 			return r;
 		}
 		acc += d;
@@ -223,11 +226,17 @@ bool EditProject::splitAt(double t)
 	if (loc.srcTime - s.in < 0.1 || s.out - loc.srcTime < 0.1)
 		return false;
 	Segment right = s;
-	right.in = loc.srcTime;
 	right.transIn = Transition::None;
 	right.rampIn = false; // 램프는 바깥쪽 끝에만 남김
-	s.out = loc.srcTime;
 	s.rampOut = false;
+	s.freeze = 0.0;       // 멈춤은 뒤쪽 구간 끝에만 남김
+	if (s.reverse) {      // 거꾸로: 앞쪽 결과 = 원본의 뒤쪽
+		right.out = loc.srcTime;
+		s.in = loc.srcTime;
+	} else {
+		right.in = loc.srcTime;
+		s.out = loc.srcTime;
+	}
 	segments.insert(loc.seg + 1, right);
 	return true;
 }
@@ -463,13 +472,22 @@ QJsonObject EditProject::toJson() const
 			{"transIn", int(s.transIn)}, {"zoom", s.zoom}, {"zoomScale", s.zoomScale},
 			{"zoomCX", s.zoomCX}, {"zoomCY", s.zoomCY}, {"shake", s.shake}, {"gray", s.gray},
 			{"vivid", s.vivid}, {"vignette", s.vignette}, {"rampIn", s.rampIn},
-			{"rampOut", s.rampOut}, {"rampLen", s.rampLen}});
+			{"rampOut", s.rampOut}, {"rampLen", s.rampLen}, {"reverse", s.reverse},
+			{"freeze", s.freeze}, {"freezeGray", s.freezeGray}, {"freezeFlash", s.freezeFlash}});
 
 	QJsonArray subs;
 	for (const Subtitle &s : subtitles)
 		subs.append(QJsonObject{{"start", s.start}, {"end", s.end}, {"text", s.text},
 					{"fontSize", s.fontSize}, {"color", s.color.name()}, {"y", s.y},
 					{"box", s.box}, {"font", s.font}});
+
+	QJsonArray sfxArr;
+	for (const SoundFx &f : sfx)
+		sfxArr.append(QJsonObject{{"start", f.start}, {"path", f.path}, {"volume", f.volume}});
+	QJsonArray imgArr;
+	for (const ImageOverlay &im : images)
+		imgArr.append(QJsonObject{{"path", im.path}, {"whole", im.whole}, {"start", im.start}, {"end", im.end},
+					  {"x", im.x}, {"y", im.y}, {"width", im.width}, {"opacity", im.opacity}});
 
 	const QJsonObject mus{{"path", music.path},       {"fileOffset", music.fileOffset},
 			      {"volume", music.volume},   {"bpm", music.bpm},
@@ -482,6 +500,8 @@ QJsonObject EditProject::toJson() const
 		{"sources", src},
 		{"segments", segs},
 		{"subtitles", subs},
+		{"sfx", sfxArr},
+		{"images", imgArr},
 		{"intro", cardToJson(intro)},
 		{"outro", cardToJson(outro)},
 		{"music", mus},
@@ -530,6 +550,10 @@ void EditProject::fromJson(const QJsonObject &o)
 		s.rampIn = j.value("rampIn").toBool();
 		s.rampOut = j.value("rampOut").toBool();
 		s.rampLen = std::clamp(j.value("rampLen").toDouble(0.5), 0.1, 3.0);
+		s.reverse = j.value("reverse").toBool();
+		s.freeze = std::clamp(j.value("freeze").toDouble(0.0), 0.0, 5.0);
+		s.freezeGray = j.value("freezeGray").toBool(true);
+		s.freezeFlash = j.value("freezeFlash").toBool(true);
 		segments.push_back(s);
 	}
 
@@ -542,6 +566,32 @@ void EditProject::fromJson(const QJsonObject &o)
 		s.text = j.value("text").toString();
 		s.styleFromJson(j);
 		subtitles.push_back(s);
+	}
+
+	sfx.clear();
+	for (const QJsonValue &v : o.value("sfx").toArray()) {
+		const QJsonObject j = v.toObject();
+		SoundFx f;
+		f.start = std::max(0.0, j.value("start").toDouble());
+		f.path = j.value("path").toString();
+		f.volume = std::clamp(j.value("volume").toDouble(1.0), 0.0, 2.0);
+		if (!f.path.isEmpty())
+			sfx.push_back(f);
+	}
+	images.clear();
+	for (const QJsonValue &v : o.value("images").toArray()) {
+		const QJsonObject j = v.toObject();
+		ImageOverlay im;
+		im.path = j.value("path").toString();
+		im.whole = j.value("whole").toBool(true);
+		im.start = std::max(0.0, j.value("start").toDouble());
+		im.end = std::max(im.start + 0.1, j.value("end").toDouble(im.start + 2.0));
+		im.x = std::clamp(j.value("x").toDouble(0.85), 0.0, 1.0);
+		im.y = std::clamp(j.value("y").toDouble(0.1), 0.0, 1.0);
+		im.width = std::clamp(j.value("width").toDouble(0.22), 0.02, 1.0);
+		im.opacity = std::clamp(j.value("opacity").toDouble(1.0), 0.05, 1.0);
+		if (!im.path.isEmpty())
+			images.push_back(im);
 	}
 
 	intro = cardFromJson(o.value("intro").toObject());

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QColor>
+#include <QFileInfo>
 #include <QJsonObject>
 #include <QRect>
 #include <QRectF>
@@ -8,6 +9,8 @@
 #include <QString>
 #include <QStringList>
 #include <QVector>
+
+#include <algorithm>
 
 // ─────────────────────────────────────────────────────────────
 // 매드무비 프로젝트: 여러 클립의 구간을 한 타임라인(결과 시간)에 이어 붙임
@@ -48,6 +51,13 @@ struct Segment {
 	bool rampOut = false;
 	double rampLen = 0.5; // 램프 구간 길이 (원본 영상 기준 초)
 
+	// 거꾸로 재생 (되감기 리플레이용, 속도 램프는 쓰지 않음)
+	bool reverse = false;
+	// 프리즈 프레임: 구간 마지막 장면에서 freeze 초 동안 멈춤
+	double freeze = 0.0;
+	bool freezeGray = true;  // 멈춘 동안 흑백
+	bool freezeFlash = true; // 멈추는 순간 번쩍
+
 	// ── 시간 변환 (x = 구간 시작부터의 원본 시간, t = 구간 시작부터의 결과 시간) ──
 	double srcLength() const { return out > in ? out - in : 0.0; }
 	bool hasRamp() const;
@@ -55,7 +65,10 @@ struct Segment {
 	double srcToOut(double x) const;
 	double outToSrc(double t) const;
 	double speedAt(double x) const;
-	double outDuration() const { return srcToOut(srcLength()); }
+	double movingDuration() const { return srcToOut(srcLength()); } // 멈춤 전까지
+	double outDuration() const { return movingDuration() + std::max(0.0, freeze); }
+	// 결과 시간 t 에 보이는 장면의 원본 위치 (구간 시작 기준, 거꾸로 재생·멈춤 반영)
+	double srcAt(double t) const { return reverse ? srcLength() - outToSrc(t) : outToSrc(t); }
 	// 결과 길이가 target 이 되도록 하는 원본 길이 (길이 조절/비트 맞춤용)
 	double srcLengthForOutDuration(double target, double maxSrc) const;
 
@@ -63,6 +76,27 @@ struct Segment {
 };
 
 // 자막: 결과 영상 시간 기준
+// 효과음: 결과 영상 시간 start 에 한 번 재생
+struct SoundFx {
+	double start = 0.0;
+	QString path;
+	double volume = 1.0;
+	QString name() const;
+};
+
+// 이미지(로고·스티커): 1080x1920 캔버스 위에 표시
+struct ImageOverlay {
+	QString path;
+	bool whole = true;  // 영상 전체에 표시 (로고 워터마크)
+	double start = 0.0; // whole 이 아닐 때 표시 시간 (결과 시간)
+	double end = 2.0;
+	double x = 0.85;    // 중심 위치 (0~1, 캔버스 기준)
+	double y = 0.10;
+	double width = 0.22; // 캔버스 폭 대비 크기
+	double opacity = 1.0;
+	bool visibleAt(double t) const { return whole || (t >= start && t < end); }
+};
+
 struct Subtitle {
 	double start = 0.0;
 	double end = 2.0;
@@ -157,6 +191,8 @@ struct EditProject {
 	QVector<SourceClip> sources;
 	QVector<Segment> segments; // 타임라인 순서
 	QVector<Subtitle> subtitles;
+	QVector<SoundFx> sfx;
+	QVector<ImageOverlay> images;
 	TitleCard intro;
 	TitleCard outro;
 	MusicTrack music;

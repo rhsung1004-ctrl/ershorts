@@ -73,6 +73,8 @@ private:
 	double m_pressX = 0.0;
 	double m_dragX = 0.0;
 	double m_origIn = 0.0;
+	double m_origOutDur = 0.0; // 앞부분 자르기 시작 때 구간 길이
+	double m_trimShift = 0.0;  // 앞부분 자르는 중: 뒤쪽 끝을 제자리에 두려고 미는 양(초)
 	double m_fixedViewDuration = 0.0; // 드래그 중 화면 배율 고정
 	ThumbnailCache *m_thumbs = nullptr;
 	double m_zoom = 1.0;

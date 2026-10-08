@@ -6,6 +6,7 @@
 #include <QString>
 #include <QStringList>
 #include <QTemporaryDir>
+#include <QVector>
 
 #include <memory>
 
@@ -46,6 +47,8 @@ private:
 	QStringList m_inputs;    // ffmpeg -i 목록
 	QMap<int, int> m_inputOf; // 소스 클립 번호 → 입력 번호
 	int m_bgmInput = -1;
+	QVector<int> m_sfxInput; // 효과음별 입력 번호 (-1 = 파일 없음)
+	QVector<int> m_imgInput; // 이미지별 입력 번호
 	QString m_filter;
 	bool m_usingHw = true;
 	bool m_previewQuality = false;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QElapsedTimer>
+#include <QHash>
 #include <QJsonObject>
 #include <QMainWindow>
 #include <QVector>
@@ -13,7 +14,9 @@ class QAudioOutput;
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
+class QGraphicsColorizeEffect;
 class QGraphicsPathItem;
+class QGraphicsPixmapItem;
 class QGraphicsRectItem;
 class QGraphicsScene;
 class QGraphicsSimpleTextItem;
@@ -62,6 +65,7 @@ private:
 	QWidget *buildSubtitleTab();
 	QWidget *buildCardTab();
 	QWidget *buildLayoutTab();
+	QWidget *buildImageTab();
 	void rebuildBandVisuals();
 	void onBandPropsChanged();
 	void updateBandEnables();
@@ -82,8 +86,8 @@ private:
 	void showStyleMenu();
 
 	// ── 미리보기에서 직접 끌어서 조정 ──
-	enum class DragKind { None, Subtitle, Video, ZoomMove, ZoomDraw };
-	DragKind previewHit(const QPointF &scenePos, int *subIndex) const;
+	enum class DragKind { None, Subtitle, Video, ZoomMove, ZoomDraw, Image };
+	DragKind previewHit(const QPointF &scenePos, int *index) const;
 	QSize activeSourceSize() const;
 
 	// ── 줌 영역 고르기 (선택한 구간의 확대 영역을 미리보기에서 마우스로 지정) ──
@@ -151,6 +155,24 @@ private:
 	void selectSubtitle(int i);
 	void onSubtitlePropsChanged();
 	void refreshSubtitleList();
+
+	// ── 되감기 리플레이 ──
+	void insertRewindReplay();
+
+	// ── 효과음 ──
+	void refreshSfxLibrary(const QString &select = {});
+	void addSfxAt(const QVector<double> &times);
+	void refreshSfxList();
+	void selectSfx(int i);
+	void triggerSfx(double from, double to); // 재생 중 지나간 효과음 소리 내기
+
+	// ── 이미지 ──
+	void addImage();
+	void deleteSelectedImage();
+	void selectImage(int i);
+	void onImagePropsChanged();
+	void refreshImageList();
+	void rebuildImageVisuals();
 
 	// ── 인트로/아웃트로 ──
 	void onCardPropsChanged();
@@ -257,6 +279,9 @@ private:
 		  *m_fxVignette = nullptr;
 	QCheckBox *m_rampIn = nullptr, *m_rampOut = nullptr;
 	QDoubleSpinBox *m_rampLen = nullptr;
+	QComboBox *m_freezeLen = nullptr;
+	QCheckBox *m_freezeGray = nullptr, *m_freezeFlash = nullptr;
+	QComboBox *m_replayLen = nullptr;
 
 	// 음악 탭
 	QLabel *m_musicFile = nullptr;
@@ -275,6 +300,26 @@ private:
 	QComboBox *m_fxBeatEvery = nullptr;
 	QPushButton *m_detectBtn = nullptr;
 	QCheckBox *m_duck = nullptr;
+	// 효과음
+	QComboBox *m_sfxLib = nullptr;
+	QListWidget *m_sfxList = nullptr;
+	QSlider *m_sfxVol = nullptr;
+	struct SfxPlayer {
+		QMediaPlayer *player = nullptr;
+		QAudioOutput *audio = nullptr;
+	};
+	QHash<QString, SfxPlayer> m_sfxPlayers;
+	double m_lastTick = 0.0;
+	QHash<int, QGraphicsColorizeEffect *> m_grayFx; // 소스 번호 → 흑백 효과 (멈춤 미리보기)
+
+	// 이미지
+	QListWidget *m_imgList = nullptr;
+	QWidget *m_imgProps = nullptr;
+	QCheckBox *m_imgWhole = nullptr;
+	QDoubleSpinBox *m_imgStart = nullptr, *m_imgEnd = nullptr;
+	QSlider *m_imgSize = nullptr, *m_imgOpacity = nullptr;
+	QVector<QGraphicsPixmapItem *> m_imgItems;
+	int m_imageTab = -1;
 	QComboBox *m_duckStrength = nullptr;
 
 	// 자막 탭

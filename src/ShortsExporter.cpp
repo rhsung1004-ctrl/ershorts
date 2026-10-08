@@ -202,6 +202,10 @@ QString ShortsExporter::buildFilter()
 		const bool nextDips = (i + 1 < p.segments.size() && p.segments[i + 1].transIn == Transition::BlackDip);
 
 		QString v = QString("[%1:v]trim=start=%2:end=%3,").arg(in).arg(num(s.in), num(s.out)) + segmentSetpts(s);
+		if (s.reverse) // 프레임 수를 먼저 줄인 뒤 뒤집음 (메모리 절약)
+			v += ",fps=60,reverse";
+		if (s.freeze > 0) // 마지막 장면을 그대로 늘려 멈춤
+			v += QString(",tpad=stop_mode=clone:stop_duration=%1").arg(num(s.freeze));
 		if (s.zoom) // 미리보기에서 고른 영역을 확대 (중심이 화면 밖으로 나가지 않게 고정)
 			v += QString(",crop=w='floor(iw/%1/2)*2':h='floor(ih/%1/2)*2':x='min(max(iw*%2-ow/2,0),iw-ow)':"
 				     "y='min(max(ih*%3-oh/2,0),ih-oh)'")
@@ -219,6 +223,15 @@ QString ShortsExporter::buildFilter()
 			v += ",eq=contrast=1.08:saturation=1.35,unsharp=5:5:0.7";
 		if (s.vignette)
 			v += ",vignette=PI/4";
+		if (s.reverse) // 되감기 느낌: 색 번짐 + 노이즈
+			v += ",rgbashift=rh=-6:bh=6,noise=alls=18:allf=t";
+		if (s.freeze > 0) {
+			const QString t0 = num(s.movingDuration());
+			if (s.freezeGray)
+				v += QString(",hue=s=0:enable='gte(t,%1)'").arg(t0);
+			if (s.freezeFlash)
+				v += QString(",eq=brightness='if(gte(t,%1),max(0,0.6-(t-%1)*2.4),0)':eval=frame").arg(t0);
+		}
 
 		// 영상 맨 처음(인트로 없음)은 흰 플래시 대신 검은 화면에서 서서히 밝아지게
 		const bool opening = (i == 0 && !p.intro.enabled);
@@ -268,9 +281,13 @@ QString ShortsExporter::buildFilter()
 			    QString(",apad=whole_dur=%1,atrim=end=%1").arg(num(exactDur));
 		} else if (src.hasAudio) {
 			a = QString("[%1:a]atrim=start=%2:end=%3,asetpts=PTS-STARTPTS").arg(in).arg(num(s.in), num(s.out));
+			if (s.reverse)
+				a += ",areverse";
 			const QString tempo = atempoChain(s.speed);
 			if (!tempo.isEmpty())
 				a += "," + tempo;
+			if (s.reverse)
+				a += ",volume=0.6";
 			a += "," + kAudioFmt + QString(",apad=whole_dur=%1,atrim=end=%1").arg(num(exactDur));
 		} else {
 			a = QString("anullsrc=r=48000:cl=stereo,atrim=duration=%1").arg(num(exactDur));
@@ -375,10 +392,30 @@ QString ShortsExporter::buildFilter()
 		} else {
 			g << b + "[bgm]";
 		}
-		g << "[game][bgm]amix=inputs=2:duration=first:normalize=0[aout]";
-	} else {
-		g << "[game]anull[aout]";
 	}
+	// 효과음: 지정한 시각에 한 번씩
+	QString mixIn = "[game]";
+	int mixN = 1;
+	if (m_bgmInput >= 0) {
+		mixIn += "[bgm]";
+		++mixN;
+	}
+	for (int k = 0; k < p.sfx.size() && k < m_sfxInput.size(); ++k) {
+		if (m_sfxInput[k] < 0 || p.sfx[k].start >= total)
+			continue;
+		const qint64 ms = qint64(std::llround(p.sfx[k].start * 1000.0));
+		g << QString("[%1:a]%2,volume=%3,adelay=delays=%4:all=1[sfx%5]")
+			     .arg(m_sfxInput[k])
+			     .arg(kAudioFmt, num(p.sfx[k].volume))
+			     .arg(ms)
+			     .arg(k);
+		mixIn += QString("[sfx%1]").arg(k);
+		++mixN;
+	}
+	if (mixN > 1)
+		g << mixIn + QString("amix=inputs=%1:duration=first:normalize=0[aout]").arg(mixN);
+	else
+		g << "[game]anull[aout]";
 
 	// ── 5) 자막 (결과 시간 기준) ──────────────────────
 	QStringList texts;
@@ -408,13 +445,32 @@ QString ShortsExporter::buildFilter()
 		}
 	}
 
-	// ── 7) 자막 → (미리보기 품질이면) 축소 ──
-	if (m_previewQuality) {
-		g << vlabel + (texts.isEmpty() ? QStringLiteral("null") : texts.join(',')) + "[subv]";
-		g << "[subv]scale=540:960:flags=bilinear,fps=30[v]";
-	} else {
-		g << vlabel + (texts.isEmpty() ? QStringLiteral("null") : texts.join(',')) + "[v]";
+	// ── 7) 자막 → 이미지(로고·스티커) → (미리보기 품질이면) 축소 ──
+	g << vlabel + (texts.isEmpty() ? QStringLiteral("null") : texts.join(',')) + "[subv]";
+	QString cur = "[subv]";
+	for (int k = 0; k < p.images.size() && k < m_imgInput.size(); ++k) {
+		if (m_imgInput[k] < 0)
+			continue;
+		const ImageOverlay &im = p.images[k];
+		const int w = std::max(2, int(std::lround(1080.0 * im.width)) & ~1);
+		g << QString("[%1:v]scale=%2:-2,format=rgba,colorchannelmixer=aa=%3[img%4]")
+			     .arg(m_imgInput[k])
+			     .arg(w)
+			     .arg(num(im.opacity))
+			     .arg(k);
+		QString ov = QString("%1[img%2]overlay=x=%3-overlay_w/2:y=%4-overlay_h/2")
+				     .arg(cur)
+				     .arg(k)
+				     .arg(num(im.x * 1080.0), num(im.y * 1920.0));
+		if (!im.whole)
+			ov += QString(":enable='between(t,%1,%2)'").arg(num(im.start), num(im.end));
+		g << ov + QString("[ov%1]").arg(k);
+		cur = QString("[ov%1]").arg(k);
 	}
+	if (m_previewQuality)
+		g << cur + "scale=540:960:flags=bilinear,fps=30[v]";
+	else
+		g << cur + "null[v]";
 
 	return g.join(';');
 }
@@ -475,6 +531,26 @@ void ShortsExporter::start(const EditProject &project, const QString &output, bo
 	if (!project.music.path.isEmpty() && QFileInfo::exists(project.music.path)) {
 		m_bgmInput = int(m_inputs.size());
 		m_inputs << project.music.path;
+	}
+	m_sfxInput.clear();
+	for (const SoundFx &f : project.sfx) {
+		if (QFileInfo::exists(f.path)) {
+			m_sfxInput << int(m_inputs.size());
+			m_inputs << f.path;
+		} else {
+			m_sfxInput << -1;
+			emit logMessage("효과음 파일이 없어 건너뜀: " + f.path);
+		}
+	}
+	m_imgInput.clear();
+	for (const ImageOverlay &im : project.images) {
+		if (QFileInfo::exists(im.path)) {
+			m_imgInput << int(m_inputs.size());
+			m_inputs << im.path;
+		} else {
+			m_imgInput << -1;
+			emit logMessage("이미지 파일이 없어 건너뜀: " + im.path);
+		}
 	}
 
 	m_filter = buildFilter();
