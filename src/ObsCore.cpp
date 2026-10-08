@@ -1,5 +1,6 @@
 #include "ObsCore.h"
 
+#include "GameClock.h"
 #include "HudKillWatcher.h"
 
 #include <algorithm>
@@ -28,7 +29,8 @@ constexpr uint32_t kChannelMic = 3;
 QByteArray u8(const QString &s) { return s.toUtf8(); }
 } // namespace
 
-ObsCore::ObsCore(QObject *parent) : QObject(parent), m_hud(std::make_unique<HudKillWatcher>())
+ObsCore::ObsCore(QObject *parent)
+	: QObject(parent), m_hud(std::make_unique<HudKillWatcher>()), m_clock(std::make_unique<GameClock>())
 {
 	// 게임 창 크기는 영상 스레드에서 직접 묻지 않고 1초마다 여기서 기억해 둠
 	m_capSizeTimer = new QTimer(this);
@@ -481,7 +483,9 @@ void ObsCore::shutdown()
 		return;
 
 	releaseOutput();
-	setHudKillWatch(false);
+	m_hudOn = false;
+	m_clockOn = false;
+	updateRawCallback();
 
 	for (uint32_t ch = 0; ch < MAX_CHANNELS; ++ch)
 		obs_set_output_source(ch, nullptr);
@@ -524,15 +528,32 @@ void ObsCore::updateCaptureSize()
 
 void ObsCore::setHudKillWatch(bool on)
 {
-	if (!m_started || on == m_rawCbOn)
+	if (on && !m_hudOn) {
+		std::lock_guard<std::mutex> lock(m_hudMutex);
+		m_hud->reset();
+	}
+	m_hudOn = on;
+	updateRawCallback();
+}
+
+void ObsCore::setGameClock(bool on)
+{
+	m_clockOn = on;
+	updateRawCallback();
+}
+
+QString ObsCore::gameTimeLabel() const { return m_clockOn ? QString::fromStdString(m_clock->label()) : QString(); }
+
+QString ObsCore::lastOcrText() const { return QString::fromStdString(m_clock->lastOcrText()); }
+
+void ObsCore::updateRawCallback()
+{
+	const bool want = m_started && (m_hudOn || m_clockOn);
+	if (want == m_rawCbOn)
 		return;
-	if (on) {
-		{
-			std::lock_guard<std::mutex> lock(m_hudMutex);
-			m_hud->reset();
-		}
+	if (want) {
 		updateCaptureSize();
-		// 밝기(Y)만 쓰므로 전체 범위 NV12, 60fps 중 12장마다 1장 = 초당 5장
+		// 전체 범위 NV12, 60fps 중 12장마다 1장 = 초당 5장
 		video_scale_info conv = {};
 		conv.format = VIDEO_FORMAT_NV12;
 		conv.width = m_baseW;
@@ -540,11 +561,10 @@ void ObsCore::setHudKillWatch(bool on)
 		conv.range = VIDEO_RANGE_FULL;
 		conv.colorspace = VIDEO_CS_709;
 		obs_add_raw_video_callback2(&conv, 12, &ObsCore::onRawVideo, this);
-		m_rawCbOn = true;
 	} else {
 		obs_remove_raw_video_callback(&ObsCore::onRawVideo, this);
-		m_rawCbOn = false;
 	}
+	m_rawCbOn = want;
 }
 
 void ObsCore::onRawVideo(void *param, struct video_data *frame)
@@ -563,7 +583,39 @@ void ObsCore::onRawVideo(void *param, struct video_data *frame)
 	const double x0 = gx + gw - (HudKillWatcher::kW + HudKillWatcher::kRoiRight) * u;
 	const double y0 = gy + HudKillWatcher::kRoiTop * u;
 
-	// 오른쪽 위 숫자 영역을 160x32 로 줄여 밝기만 뽑음
+	// ── 게임 시간 (1초에 한 번): 가운데 위 영역을 RGB 로 ──
+	if (self->m_clockOn && (self->m_rawFrame++ % 5) == 0 && frame->data[1]) {
+		thread_local std::vector<uint8_t> rgb(size_t(GameClock::kW) * GameClock::kH * 3);
+		const uint8_t *Yp = frame->data[0];
+		const uint8_t *UV = frame->data[1];
+		const int lsY = int(frame->linesize[0]), lsUV = int(frame->linesize[1]);
+		const double step = u / 4.0; // 720 기준 1px 를 4칸으로
+		const double cx0 = gx + gw / 2 + GameClock::kLeft * u;
+		const double cy0 = gy + GameClock::kTop * u;
+		for (int j = 0; j < GameClock::kH; ++j) {
+			const double fy = std::clamp(cy0 + (j + 0.5) * step - 0.5, 0.0, H - 2);
+			const int y = int(fy);
+			const double ty = fy - y;
+			for (int i = 0; i < GameClock::kW; ++i) {
+				const double fx = std::clamp(cx0 + (i + 0.5) * step - 0.5, 0.0, W - 2);
+				const int x = int(fx);
+				const double tx = fx - x;
+				const double Yv = (1 - ty) * ((1 - tx) * Yp[size_t(y) * lsY + x] + tx * Yp[size_t(y) * lsY + x + 1]) +
+						  ty * ((1 - tx) * Yp[size_t(y + 1) * lsY + x] + tx * Yp[size_t(y + 1) * lsY + x + 1]);
+				const uint8_t *c = UV + size_t(y / 2) * lsUV + (x / 2) * 2;
+				const double Cb = c[0] - 128.0, Cr = c[1] - 128.0;
+				uint8_t *o = &rgb[(size_t(j) * GameClock::kW + i) * 3];
+				o[0] = uint8_t(std::clamp(Yv + 1.5748 * Cr, 0.0, 255.0));
+				o[1] = uint8_t(std::clamp(Yv - 0.1873 * Cb - 0.4681 * Cr, 0.0, 255.0));
+				o[2] = uint8_t(std::clamp(Yv + 1.8556 * Cb, 0.0, 255.0));
+			}
+		}
+		self->m_clock->feed(rgb.data(), int64_t(frame->timestamp / 1000000));
+	}
+	if (!self->m_hudOn)
+		return;
+
+	// ── 킬 숫자: 오른쪽 위 영역을 160x32 로 줄여 밝기만 ──
 	thread_local std::vector<uint8_t> roi(HudKillWatcher::kW * HudKillWatcher::kH);
 	const uint8_t *Y = frame->data[0];
 	const int ls = int(frame->linesize[0]);

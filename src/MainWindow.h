@@ -4,6 +4,9 @@
 
 #include "ObsCore.h"
 
+#include <QDateTime>
+#include <QList>
+
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
@@ -70,6 +73,11 @@ private:
 	void onHudKill(bool kill, bool assist);
 	void findKillsInClip(const QString &path); // 저장된 클립으로 인식 테스트
 
+	// 클립 이름 = 게임 시간 ("4일차 낮 …")
+	void saveClipWith(const QString &label, const QString &tag);
+	QString renameToGameTime(const QString &path, const QString &label, const QString &tag, const QDateTime &when);
+	void renameClipsByGameTime();
+
 	ObsCore *m_core = nullptr;
 	GlobalHotkey *m_hotkey = nullptr;
 
@@ -88,6 +96,15 @@ private:
 	QComboBox *m_killDelay = nullptr;
 	QTimer *m_killSaveTimer = nullptr;
 	qint64 m_killFirstMs = 0; // 이번 연속 킬에서 첫 감지 시각
+	QString m_killWhat;       // 이번 자동 저장의 종류 (킬/어시스트)
+	QString m_killLabel;      // 첫 킬 때의 게임 시간
+	QCheckBox *m_nameByClock = nullptr;
+	struct PendingName {
+		QString label;
+		QString tag;
+		QDateTime when;
+	};
+	QList<PendingName> m_pendingNames; // 저장 요청 순서대로 (저장 완료 때 이름 붙임)
 	QPushButton *m_toggleBtn = nullptr;
 	QPushButton *m_saveBtn = nullptr;
 

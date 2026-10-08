@@ -2,6 +2,7 @@
 
 #include "ClipInfoCache.h"
 #include "Diagnostics.h"
+#include "GameClock.h"
 #include "HudKillWatcher.h"
 #include "ShortsExporter.h"
 #include "EditorWindow.h"
@@ -39,6 +40,8 @@
 #include <QSplitter>
 #include <QStandardPaths>
 #include <QTimer>
+
+#include <future>
 #include <QPainter>
 #include <QPixmap>
 #include <QIcon>
@@ -105,6 +108,11 @@ bool MainWindow::initialize(QString *error)
 	refreshClipList();
 
 	applyKillWatch();
+	m_core->setGameClock(m_nameByClock->isChecked());
+	connect(m_nameByClock, &QCheckBox::toggled, this, [this](bool on) {
+		m_core->setGameClock(on);
+		saveSettings();
+	});
 	connect(m_killAuto, &QCheckBox::toggled, this, [this] {
 		applyKillWatch();
 		saveSettings();
@@ -196,7 +204,7 @@ void MainWindow::buildUi()
 		if (!m_core->isReplayActive())
 			return;
 		log("킬 장면 자동 저장");
-		onSaveClip();
+		saveClipWith(m_killLabel.isEmpty() ? m_core->gameTimeLabel() : m_killLabel, m_killWhat);
 	});
 	auto *applyBtn = new QPushButton("설정 적용");
 	m_toggleBtn = new QPushButton("버퍼 시작");
@@ -211,6 +219,10 @@ void MainWindow::buildUi()
 	recForm->addRow(m_gameAudioOnly);
 	recForm->addRow(m_saveSound);
 	recForm->addRow(m_autoStart);
+	m_nameByClock = new QCheckBox("클립 이름을 게임 시간으로 (예: 4일차 낮)");
+	m_nameByClock->setToolTip("화면 가운데 위 'N일 차'와 해/달 아이콘을 읽어서, 저장할 때의 게임 시간을 클립 이름으로 씁니다.\n"
+				  "며칠째인지는 Windows 글자 인식으로 읽어요. 못 읽으면 '낮'/'밤'만 붙여요.");
+	recForm->addRow(m_nameByClock);
 	auto *killRow = new QHBoxLayout;
 	killRow->addWidget(m_killAuto, 1);
 	killRow->addWidget(m_killDelay);
@@ -340,6 +352,7 @@ void MainWindow::loadSettings()
 	m_saveSound->setChecked(s.value("saveSound", false).toBool());
 	m_autoStart->setChecked(s.value("autoStart", true).toBool());
 	m_killAuto->setChecked(s.value("killAutoHud", false).toBool());
+	m_nameByClock->setChecked(s.value("nameByClock", true).toBool());
 	m_killDelay->setCurrentIndex(std::max(0, m_killDelay->findData(s.value("killDelay", 10).toInt())));
 	m_favorites = s.value("favoriteClips").toStringList();
 	m_favOnly->blockSignals(true);
@@ -361,6 +374,7 @@ void MainWindow::saveSettings()
 	s.setValue("saveSound", m_saveSound->isChecked());
 	s.setValue("autoStart", m_autoStart->isChecked());
 	s.setValue("killAutoHud", m_killAuto->isChecked());
+	s.setValue("nameByClock", m_nameByClock->isChecked());
 	s.setValue("killDelay", m_killDelay->currentData().toInt());
 	s.setValue("favoriteClips", m_favorites);
 	s.setValue("favoriteOnly", m_favOnly->isChecked());
@@ -404,20 +418,58 @@ void MainWindow::onToggleReplay()
 	}
 }
 
-void MainWindow::onSaveClip()
+void MainWindow::onSaveClip() { saveClipWith(m_core->gameTimeLabel(), QString()); }
+
+void MainWindow::saveClipWith(const QString &label, const QString &tag)
 {
 	if (!m_core->saveReplay()) {
 		log("버퍼가 꺼져 있어 저장할 수 없습니다");
 		if (m_saveSound->isChecked())
 			MessageBeep(MB_ICONHAND);
+		return;
 	}
+	// 저장 버튼을 누른 순간의 게임 시간을 기억해 뒀다가, 파일이 다 저장되면 이름을 바꿈
+	m_pendingNames.push_back({m_nameByClock->isChecked() ? label : QString(), tag, QDateTime::currentDateTime()});
+}
+
+QString MainWindow::renameToGameTime(const QString &path, const QString &label, const QString &tag,
+				     const QDateTime &when)
+{
+	if (label.isEmpty())
+		return path;
+	const QFileInfo fi(path);
+	QString base = label;
+	if (!tag.isEmpty())
+		base += " " + tag;
+	base += " " + when.toString("MM.dd hh시mm분");
+	static const QString bad = "\\/:*?\"<>|";
+	for (QChar c : bad)
+		base.remove(c);
+	QString target = fi.absolutePath() + "/" + base + "." + fi.suffix();
+	for (int n = 2; QFileInfo::exists(target); ++n)
+		target = fi.absolutePath() + "/" + base + QString(" (%1).").arg(n) + fi.suffix();
+	if (!QFile::rename(path, target))
+		return path;
+	if (isFavorite(path)) {
+		setFavorite(path, false);
+		setFavorite(target, true);
+	}
+	updateProjectsForRename(path, target);
+	return target;
 }
 
 void MainWindow::onClipSaved(const QString &path)
 {
 	if (m_saveSound->isChecked())
 		MessageBeep(MB_OK); // (선택) 게임 중에도 저장됐는지 소리로 확인
-	log("클립 저장됨: " + QFileInfo(path).fileName());
+	QString saved = path;
+	if (!m_pendingNames.isEmpty()) {
+		const PendingName pn = m_pendingNames.takeFirst();
+		saved = renameToGameTime(path, pn.label, pn.tag, pn.when);
+		if (m_nameByClock->isChecked() && pn.label.isEmpty())
+			log("게임 시간을 읽지 못해 기본 이름으로 저장했어요 (게임 화면이 아니었거나 가운데 위 표시가 가려짐)");
+	}
+	log("클립 저장됨: " + QFileInfo(saved).fileName());
 	// 소리 대신 화면으로 알림: 상태 표시를 3초간 '저장됨'으로
 	m_status->setText("<b style='color:#30a46c'>✔ 클립 저장됨</b>");
 	QTimer::singleShot(3000, this, [this] { onReplayStateChanged(m_core->isReplayActive()); });
@@ -665,6 +717,7 @@ void MainWindow::showClipMenu(const QPoint &pos)
 		menu.addAction("폴더에서 보기", this, [path] {
 			QProcess::startDetached("explorer.exe", {"/select,", QDir::toNativeSeparators(path)});
 		});
+	menu.addAction("🕒 게임 시간으로 이름 바꾸기", this, &MainWindow::renameClipsByGameTime);
 	if (!multi)
 		menu.addAction("🔎 이 클립에서 킬 찾기 (테스트)", this, [this, path] { findKillsInClip(path); });
 	menu.addSeparator();
@@ -754,8 +807,13 @@ void MainWindow::onHudKill(bool kill, bool assist)
 	// 마지막 킬에서 정해 둔 시간 뒤 저장. 그 사이 또 킬하면 미뤄서 연속 킬을 한 클립에 (첫 킬 후 최대 +20초)
 	const int delayMs = m_killDelay->currentData().toInt() * 1000;
 	const qint64 now = QDateTime::currentMSecsSinceEpoch();
-	if (!m_killSaveTimer->isActive())
+	if (!m_killSaveTimer->isActive()) {
 		m_killFirstMs = now;
+		m_killLabel = m_core->gameTimeLabel(); // 첫 킬 때의 게임 시간으로 이름 붙임
+		m_killWhat = what;
+	} else if (what.contains("킬") || m_killWhat.contains("킬")) {
+		m_killWhat = "킬"; // 연속으로 묶일 때 킬이 하나라도 있으면 '킬'
+	}
 	const qint64 wait = std::clamp<qint64>(m_killFirstMs + delayMs + 20000 - now, 0, delayMs);
 	m_killSaveTimer->start(int(wait));
 	m_status->setText(QString("<b style='color:#f5b400'>⚔ %1 — %2초 뒤 저장</b>").arg(what).arg((wait + 500) / 1000));
@@ -808,4 +866,59 @@ void MainWindow::findKillsInClip(const QString &path)
 				   .arg(HudKillWatcher::kRoiTop);
 	proc->start(ShortsExporter::ffmpegPath(),
 		    {"-hide_banner", "-loglevel", "error", "-i", path, "-an", "-vf", vf, "-f", "rawvideo", "-"});
+}
+
+void MainWindow::renameClipsByGameTime()
+{
+	const QStringList paths = selectedClipPaths();
+	if (paths.isEmpty())
+		return;
+	m_clipInfo->cancelAll(); // 목록용 장면 추출이 파일을 붙잡고 있지 않게
+	int done = 0;
+	for (const QString &path : paths) {
+		// 클립 끝부분(저장한 순간)의 가운데 위 영역을 한 장 뽑아 판단 (안 보이면 조금 앞에서 다시)
+		GameClock::Phase phase = GameClock::None;
+		int day = 0;
+		std::wstring raw;
+		for (const char *from : {"-1", "-3", "-6"}) {
+			QProcess ff;
+			const QString vf =
+				QString("crop=w='ih/720*%1':h='ih/720*%2':x='iw/2+ih/720*(%3)':y='ih/720*%4',scale=%5:%6:flags=bicubic")
+					.arg(GameClock::kUnitW)
+					.arg(GameClock::kUnitH)
+					.arg(GameClock::kLeft)
+					.arg(GameClock::kTop)
+					.arg(GameClock::kW)
+					.arg(GameClock::kH);
+			ff.start(ShortsExporter::ffmpegPath(), {"-hide_banner", "-loglevel", "error", "-sseof", from, "-i", path,
+								"-frames:v", "1", "-vf", vf, "-f", "rawvideo", "-pix_fmt",
+								"rgb24", "-"});
+			if (!ff.waitForFinished(15000))
+				continue;
+			const QByteArray rgb = ff.readAllStandardOutput();
+			if (rgb.size() < GameClock::kW * GameClock::kH * 3)
+				continue;
+			const auto *px = reinterpret_cast<const uint8_t *>(rgb.constData());
+			phase = GameClock::phaseOf(px);
+			if (phase == GameClock::None)
+				continue;
+			// 글자 인식은 UI 스레드에서 기다리면 안 되므로 다른 스레드에서
+			const std::vector<uint8_t> copy(px, px + rgb.size());
+			day = std::async(std::launch::async, [copy, &raw] { return GameClock::readDay(copy.data(), &raw); }).get();
+			break;
+		}
+		const QString label = QString::fromStdString(GameClock::makeLabel(day, phase));
+		if (label.isEmpty()) {
+			log("게임 시간을 찾지 못함: " + QFileInfo(path).fileName());
+			continue;
+		}
+		const QString now = renameToGameTime(path, label, QString(), QFileInfo(path).lastModified());
+		if (now != path) {
+			++done;
+			log(QString("이름 변경: %1 → %2 (읽은 글자: %3)")
+				    .arg(QFileInfo(path).fileName(), QFileInfo(now).fileName(), QString::fromStdWString(raw)));
+		}
+	}
+	if (done > 0)
+		refreshClipList();
 }

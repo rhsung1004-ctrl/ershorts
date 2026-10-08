@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 
+class GameClock;
 class HudKillWatcher;
 class QTimer;
 
@@ -55,7 +56,10 @@ public:
 
 	// 화면 오른쪽 위 TK/K/A 숫자를 지켜보다가 TK 와 K 또는 A 가 함께 오르면 hudKillDetected 신호
 	void setHudKillWatch(bool on);
-	bool hudKillWatchOn() const { return m_rawCbOn; }
+	// 화면 가운데 위 "N일 차"와 해/달을 읽어 지금 게임 시간 ("4일차 낮") 기억
+	void setGameClock(bool on);
+	QString gameTimeLabel() const; // 모르면 빈 문자열
+	QString lastOcrText() const;
 
 	QString videoEncoderName() const { return m_videoEncoderId; }
 	uint32_t baseWidth() const { return m_baseW; }
@@ -79,6 +83,7 @@ private:
 
 	static void onRawVideo(void *param, struct video_data *frame);
 	void updateCaptureSize();
+	void updateRawCallback();
 
 	static void onReplaySaved(void *data, calldata_t *cd);
 	static void onReplayStopped(void *data, calldata_t *cd);
@@ -104,6 +109,10 @@ private:
 	std::unique_ptr<HudKillWatcher> m_hud;
 	std::mutex m_hudMutex;
 	bool m_rawCbOn = false;
+	std::atomic<bool> m_hudOn{false};
+	std::atomic<bool> m_clockOn{false};
+	std::unique_ptr<GameClock> m_clock;
+	int m_rawFrame = 0; // 영상 스레드 전용
 	std::atomic<int> m_capW{0}, m_capH{0}; // 게임 화면(캡처 소스) 크기
 	QTimer *m_capSizeTimer = nullptr;
 };
