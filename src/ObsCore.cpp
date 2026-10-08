@@ -1,6 +1,11 @@
 #include "ObsCore.h"
 
-#include "KillSoundDetector.h"
+#include "HudKillWatcher.h"
+
+#include <algorithm>
+#include <cmath>
+
+#include <QTimer>
 
 #include <QCoreApplication>
 #include <QDir>
@@ -23,7 +28,13 @@ constexpr uint32_t kChannelMic = 3;
 QByteArray u8(const QString &s) { return s.toUtf8(); }
 } // namespace
 
-ObsCore::ObsCore(QObject *parent) : QObject(parent), m_kill(std::make_unique<KillSoundDetector>()) {}
+ObsCore::ObsCore(QObject *parent) : QObject(parent), m_hud(std::make_unique<HudKillWatcher>())
+{
+	// 게임 창 크기는 영상 스레드에서 직접 묻지 않고 1초마다 여기서 기억해 둠
+	m_capSizeTimer = new QTimer(this);
+	connect(m_capSizeTimer, &QTimer::timeout, this, &ObsCore::updateCaptureSize);
+	m_capSizeTimer->start(1000);
+}
 
 ObsCore::~ObsCore() { shutdown(); }
 
@@ -112,7 +123,6 @@ void ObsCore::createScene()
 
 void ObsCore::rebuildCaptureSource()
 {
-	detachKillListener(); // 소스를 지우기 전에 소리 듣기를 먼저 끊음
 	if (m_captureItem) {
 		obs_sceneitem_remove(m_captureItem);
 		m_captureItem = nullptr;
@@ -231,7 +241,6 @@ void ObsCore::retargetWindowIfNeeded()
 
 void ObsCore::rebuildAudioSources()
 {
-	detachKillListener();
 	obs_set_output_source(kChannelDesktop, nullptr);
 	obs_set_output_source(kChannelMic, nullptr);
 	if (m_desktopAudio) {
@@ -360,7 +369,6 @@ bool ObsCore::applySettings(const Settings &s, QString *error)
 
 	rebuildCaptureSource();
 	rebuildAudioSources();
-	attachKillListener();
 	if (!createEncodersAndOutput(error))
 		return false;
 
@@ -473,7 +481,7 @@ void ObsCore::shutdown()
 		return;
 
 	releaseOutput();
-	detachKillListener();
+	setHudKillWatch(false);
 
 	for (uint32_t ch = 0; ch < MAX_CHANNELS; ++ch)
 		obs_set_output_source(ch, nullptr);
@@ -503,64 +511,88 @@ void ObsCore::shutdown()
 	m_started = false;
 }
 
-// ─── 킬 사운드 감지 ───────────────────────────────────────
-void ObsCore::setKillDetection(bool on, double threshold)
+// ─── 킬 숫자 감시 ─────────────────────────────────────────
+void ObsCore::updateCaptureSize()
 {
-	{
-		std::lock_guard<std::mutex> lock(m_killMutex);
-		m_kill->setThreshold(threshold);
-		if (on && !m_killOn.load())
-			m_kill->reset();
-	}
-	m_killOn.store(on);
-}
-
-void ObsCore::attachKillListener()
-{
-	detachKillListener();
-	// 게임 소리만 녹음하면 창 캡처 소스가 게임 소리를 내보내고, 아니면 데스크톱 소리
-	const bool appAudio = m_settings.gameAudioOnly && m_settings.captureMode == CaptureMode::Window;
-	obs_source_t *src = appAudio ? m_capture : m_desktopAudio;
-	if (!src)
+	if (!m_capture) {
+		m_capW = m_capH = 0;
 		return;
-	{
-		std::lock_guard<std::mutex> lock(m_killMutex);
-		m_kill->reset();
 	}
-	obs_source_add_audio_capture_callback(src, &ObsCore::onAudioCapture, this);
-	m_listenSrc = src;
+	m_capW = int(obs_source_get_width(m_capture));
+	m_capH = int(obs_source_get_height(m_capture));
 }
 
-void ObsCore::detachKillListener()
+void ObsCore::setHudKillWatch(bool on)
 {
-	if (!m_listenSrc)
+	if (!m_started || on == m_rawCbOn)
 		return;
-	obs_source_remove_audio_capture_callback(m_listenSrc, &ObsCore::onAudioCapture, this);
-	m_listenSrc = nullptr;
+	if (on) {
+		{
+			std::lock_guard<std::mutex> lock(m_hudMutex);
+			m_hud->reset();
+		}
+		updateCaptureSize();
+		// 밝기(Y)만 쓰므로 전체 범위 NV12, 60fps 중 12장마다 1장 = 초당 5장
+		video_scale_info conv = {};
+		conv.format = VIDEO_FORMAT_NV12;
+		conv.width = m_baseW;
+		conv.height = m_baseH;
+		conv.range = VIDEO_RANGE_FULL;
+		conv.colorspace = VIDEO_CS_709;
+		obs_add_raw_video_callback2(&conv, 12, &ObsCore::onRawVideo, this);
+		m_rawCbOn = true;
+	} else {
+		obs_remove_raw_video_callback(&ObsCore::onRawVideo, this);
+		m_rawCbOn = false;
+	}
 }
 
-void ObsCore::onAudioCapture(void *param, obs_source_t *, const struct audio_data *audio, bool)
+void ObsCore::onRawVideo(void *param, struct video_data *frame)
 {
 	auto *self = static_cast<ObsCore *>(param);
-	if (!self->m_killOn.load() || !audio || audio->frames == 0 || !audio->data[0])
+	const int sw = self->m_capW.load(), sh = self->m_capH.load();
+	if (!frame || !frame->data[0] || sw <= 0 || sh <= 0)
 		return;
-	// OBS 내부 형식: 48kHz float 플레인 → 모노로 합침
-	const auto *l = reinterpret_cast<const float *>(audio->data[0]);
-	const auto *r = audio->data[1] ? reinterpret_cast<const float *>(audio->data[1]) : l;
-	thread_local std::vector<float> mono;
-	thread_local std::vector<KillSoundDetector::Hit> hits;
-	mono.resize(audio->frames);
-	for (uint32_t i = 0; i < audio->frames; ++i)
-		mono[i] = 0.5f * (l[i] + r[i]);
-	hits.clear();
-	{
-		std::lock_guard<std::mutex> lock(self->m_killMutex);
-		self->m_kill->process(mono.data(), int(mono.size()), &hits);
+
+	// 게임 화면이 캔버스 안에 들어간 자리 (가운데 맞춤, 비율 유지)
+	const double W = self->m_baseW, H = self->m_baseH;
+	const double s = std::min(W / sw, H / sh);
+	const double gw = sw * s, gh = sh * s;
+	const double gx = (W - gw) / 2, gy = (H - gh) / 2;
+	const double u = gh / 720.0; // 게임 화면 높이 720 기준 1px
+	const double x0 = gx + gw - (HudKillWatcher::kW + HudKillWatcher::kRoiRight) * u;
+	const double y0 = gy + HudKillWatcher::kRoiTop * u;
+
+	// 오른쪽 위 숫자 영역을 160x32 로 줄여 밝기만 뽑음
+	thread_local std::vector<uint8_t> roi(HudKillWatcher::kW * HudKillWatcher::kH);
+	const uint8_t *Y = frame->data[0];
+	const int ls = int(frame->linesize[0]);
+	for (int j = 0; j < HudKillWatcher::kH; ++j) {
+		int ya = int(std::floor(y0 + j * u)), yb = int(std::floor(y0 + (j + 1) * u));
+		ya = std::clamp(ya, 0, int(H) - 1);
+		yb = std::clamp(std::max(yb, ya + 1), 1, int(H));
+		for (int i = 0; i < HudKillWatcher::kW; ++i) {
+			int xa = int(std::floor(x0 + i * u)), xb = int(std::floor(x0 + (i + 1) * u));
+			xa = std::clamp(xa, 0, int(W) - 1);
+			xb = std::clamp(std::max(xb, xa + 1), 1, int(W));
+			unsigned sum = 0, n = 0;
+			for (int y = ya; y < yb; ++y)
+				for (int x = xa; x < xb; ++x) {
+					sum += Y[size_t(y) * ls + x];
+					++n;
+				}
+			roi[size_t(j * HudKillWatcher::kW + i)] = uint8_t(n ? sum / n : 0);
+		}
 	}
-	for (const KillSoundDetector::Hit &h : hits) {
-		const double score = h.score;
-		const int kind = h.kind;
-		QMetaObject::invokeMethod(
-			self, [self, score, kind] { emit self->killSoundDetected(score, kind); }, Qt::QueuedConnection);
+
+	thread_local std::vector<HudKillWatcher::Event> events;
+	events.clear();
+	{
+		std::lock_guard<std::mutex> lock(self->m_hudMutex);
+		self->m_hud->feed(roi.data(), double(frame->timestamp) / 1e9, &events);
+	}
+	for (const HudKillWatcher::Event &e : events) {
+		const bool k = e.kill, a = e.assist;
+		QMetaObject::invokeMethod(self, [self, k, a] { emit self->hudKillDetected(k, a); }, Qt::QueuedConnection);
 	}
 }

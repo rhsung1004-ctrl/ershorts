@@ -66,10 +66,9 @@ private:
 	void updateProjectsForRename(const QString &oldPath, const QString &newPath);
 
 	// 킬 사운드 자동 저장
-	double killThreshold() const;
-	void applyKillDetection();
-	void onKillSound(double score, int kind);
-	void findKillSoundsInClip(const QString &path); // 저장된 클립으로 감지 테스트
+	void applyKillWatch();
+	void onHudKill(bool kill, bool assist);
+	void findKillsInClip(const QString &path); // 저장된 클립으로 인식 테스트
 
 	ObsCore *m_core = nullptr;
 	GlobalHotkey *m_hotkey = nullptr;
@@ -86,7 +85,7 @@ private:
 	QCheckBox *m_gameAudioOnly = nullptr;
 	QCheckBox *m_saveSound = nullptr;
 	QCheckBox *m_killAuto = nullptr;
-	QComboBox *m_killSens = nullptr;
+	QComboBox *m_killDelay = nullptr;
 	QTimer *m_killSaveTimer = nullptr;
 	qint64 m_killFirstMs = 0; // 이번 연속 킬에서 첫 감지 시각
 	QPushButton *m_toggleBtn = nullptr;
