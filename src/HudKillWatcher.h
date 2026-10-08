@@ -41,11 +41,14 @@ private:
 	static bool sameShape(const Group &a, const Group &b);
 	static bool samePlace(const Digits &a, const Digits &b);
 	static bool allSame(const Digits &a, const Digits &b);
+	// 숫자 덩어리가 '0' 인지 (가운데 큰 구멍이 하나) — 0 으로 바뀌는 건 새 판 시작뿐
+	static bool isZero(const uint8_t *gray, const Group &g);
 
 	bool m_haveStable = false;
 	Digits m_stable;
 	Digits m_cand;      // 바뀐 모양 후보 (같은 자리)
 	double m_candT = -1;
+	std::vector<uint8_t> m_candGray; // 후보가 처음 보인 장면 (0 판별용)
 	Digits m_alt;       // 자리가 어긋난 모양 후보 (레이아웃 변화면 3초 뒤 새 기준으로)
 	double m_altT = -1;
 

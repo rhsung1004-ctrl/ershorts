@@ -153,6 +153,7 @@ void HudKillWatcher::feed(const uint8_t *gray, double t, std::vector<Event> *eve
 	if (m_cand.empty() || !allSame(m_cand, d)) {
 		m_cand = d;
 		m_candT = t;
+		m_candGray.assign(gray, gray + kW * kH);
 		return;
 	}
 	if (t - m_candT < kStableSec)
@@ -162,8 +163,12 @@ void HudKillWatcher::feed(const uint8_t *gray, double t, std::vector<Event> *eve
 	bool changed[3];
 	for (int i = 0; i < 3; ++i)
 		changed[i] = !sameShape(m_cand[i], m_stable[i]);
-	const bool reset = changed[0] && changed[1] && changed[2] && sameShape(m_cand[0], m_cand[1]) &&
-			   sameShape(m_cand[1], m_cand[2]); // 새 판 시작 (0 0 0)
+	// 새 판 시작: 숫자가 0 으로 바뀜 (로딩 화면 → 게임 화면에서 "0 0 0" 이 나타날 때 등)
+	bool toZero = false;
+	for (int i = 0; i < 3; ++i)
+		toZero = toZero || (changed[i] && isZero(m_candGray.data(), m_cand[i]));
+	const bool reset = toZero || (changed[0] && changed[1] && changed[2] && sameShape(m_cand[0], m_cand[1]) &&
+				      sameShape(m_cand[1], m_cand[2]));
 	const double when = m_candT;
 	m_stable = m_cand;
 	m_cand.clear();
@@ -192,4 +197,67 @@ void HudKillWatcher::feed(const uint8_t *gray, double t, std::vector<Event> *eve
 		m_tkT = m_kaT = -1e9;
 		m_k = m_a = false;
 	}
+}
+
+bool HudKillWatcher::isZero(const uint8_t *gray, const Group &g)
+{
+	// 조금 낮은 기준(150)으로 다시 잘라서 끊긴 획을 이음
+	constexpr int th = 150;
+	const int xa = std::max(0, g.x0 - 1), xb = std::min(kW, g.x1 + 1);
+	int top = kH, bottom = -1, left = kW, right = -1;
+	for (int y = kBandTop; y < kBandBottom; ++y)
+		for (int x = xa; x < xb; ++x)
+			if (gray[y * kW + x] > th) {
+				top = std::min(top, y);
+				bottom = std::max(bottom, y);
+				left = std::min(left, x);
+				right = std::max(right, x);
+			}
+	if (bottom < 0)
+		return false;
+	const int h = bottom - top + 1, w = right - left + 1;
+	if (h < 5 || w < 3)
+		return false;
+	// 테두리 1칸을 둘러 바깥 빈칸을 채우고, 남은 빈칸 = 구멍
+	const int PW = w + 2, PH = h + 2;
+	std::vector<uint8_t> ink(size_t(PW * PH), 0), mark(size_t(PW * PH), 0);
+	for (int y = 0; y < h; ++y)
+		for (int x = 0; x < w; ++x)
+			ink[size_t((y + 1) * PW + x + 1)] = gray[(top + y) * kW + left + x] > th;
+	auto flood = [&](int sx, int sy, uint8_t id, int *minY, int *maxY) {
+		std::vector<int> st{sy * PW + sx};
+		mark[size_t(st[0])] = id;
+		while (!st.empty()) {
+			const int p = st.back();
+			st.pop_back();
+			const int px = p % PW, py = p / PW;
+			*minY = std::min(*minY, py);
+			*maxY = std::max(*maxY, py);
+			const int nb[4] = {p - 1, p + 1, p - PW, p + PW};
+			for (int k = 0; k < 4; ++k) {
+				const int q = nb[k];
+				const int qx = q % PW, qy = q / PW;
+				if (q < 0 || q >= PW * PH || std::abs(qx - px) + std::abs(qy - py) != 1)
+					continue;
+				if (!ink[size_t(q)] && !mark[size_t(q)]) {
+					mark[size_t(q)] = id;
+					st.push_back(q);
+				}
+			}
+		}
+	};
+	int dummy0 = 0, dummy1 = 0;
+	flood(0, 0, 1, &dummy0, &dummy1); // 바깥
+	int holes = 0, holeTop = 0, holeBottom = 0;
+	for (int p = 0; p < PW * PH; ++p) {
+		if (ink[size_t(p)] || mark[size_t(p)])
+			continue;
+		int mn = PH, mx = -1;
+		flood(p % PW, p / PW, 2, &mn, &mx);
+		++holes;
+		holeTop = mn;
+		holeBottom = mx;
+	}
+	// 구멍이 딱 하나(8 은 둘)이고, 세로로 글자 높이의 절반 이상(6·9 는 절반 아래)
+	return holes == 1 && (holeBottom - holeTop + 1) * 2 >= h;
 }
