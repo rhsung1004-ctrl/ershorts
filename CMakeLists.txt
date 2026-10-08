@@ -47,7 +47,7 @@ if(MSVC)
   target_compile_options(ERShorts PRIVATE /utf-8 /W3)
 endif()
 # Windows 글자 인식(C++/WinRT) 파일은 헤더가 커서 /bigobj 필요
-set_source_files_properties(src/GameClockOcr.cpp PROPERTIES COMPILE_OPTIONS "/bigobj;/permissive-")
+set_source_files_properties(src/GameClockOcr.cpp PROPERTIES COMPILE_OPTIONS "/bigobj;/permissive-;/std:c++20")
 # Windows.h 의 min/max 매크로가 std::min/std::max 를 망가뜨리지 않도록
 target_compile_definitions(ERShorts PRIVATE NOMINMAX)
 
