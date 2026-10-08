@@ -5,6 +5,12 @@
 #include <QVector>
 #include <obs.h>
 
+#include <atomic>
+#include <memory>
+#include <mutex>
+
+class KillSoundDetector;
+
 // libobs를 앱 안에서 초기화하고, 캡처 소스 + 리플레이 버퍼를 관리하는 클래스
 class ObsCore : public QObject {
 	Q_OBJECT
@@ -46,6 +52,9 @@ public:
 	void retargetWindowIfNeeded();
 	QString currentWindowTarget() const { return m_windowTarget; }
 
+	// 게임 소리에서 킬(빈사) 효과음을 들으면 killSoundDetected 신호 (threshold: KillSoundDetector 기준값)
+	void setKillDetection(bool on, double threshold);
+
 	QString videoEncoderName() const { return m_videoEncoderId; }
 	uint32_t baseWidth() const { return m_baseW; }
 	uint32_t baseHeight() const { return m_baseH; }
@@ -54,6 +63,7 @@ signals:
 	void clipSaved(const QString &path);
 	void replayStateChanged(bool active);
 	void logMessage(const QString &msg);
+	void killSoundDetected(double score, int kind);
 
 private:
 	bool resetVideo(QString *error);
@@ -64,6 +74,10 @@ private:
 	bool createEncodersAndOutput(QString *error);
 	void releaseOutput();
 	QString pickVideoEncoder() const;
+
+	void attachKillListener();
+	void detachKillListener();
+	static void onAudioCapture(void *param, obs_source_t *source, const struct audio_data *audio, bool muted);
 
 	static void onReplaySaved(void *data, calldata_t *cd);
 	static void onReplayStopped(void *data, calldata_t *cd);
@@ -84,4 +98,10 @@ private:
 	obs_encoder_t *m_aenc = nullptr;
 	obs_output_t *m_replay = nullptr;
 	QString m_videoEncoderId;
+
+	// 킬 사운드 감지 (오디오 스레드에서 실행)
+	std::unique_ptr<KillSoundDetector> m_kill;
+	std::mutex m_killMutex;
+	std::atomic<bool> m_killOn{false};
+	obs_source_t *m_listenSrc = nullptr;
 };

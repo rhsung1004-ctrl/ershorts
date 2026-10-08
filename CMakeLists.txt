@@ -35,6 +35,7 @@ add_executable(ERShorts WIN32
   src/ClipInfoCache.h     src/ClipInfoCache.cpp
   src/StylePresets.h      src/StylePresets.cpp
   src/AudioEnvelope.h     src/AudioEnvelope.cpp
+  src/KillSoundDetector.h src/KillSoundDetector.cpp src/KillSoundTemplates.h
 )
 
 target_link_libraries(ERShorts PRIVATE

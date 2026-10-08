@@ -2,6 +2,8 @@
 
 #include "ClipInfoCache.h"
 #include "Diagnostics.h"
+#include "KillSoundDetector.h"
+#include "ShortsExporter.h"
 #include "EditorWindow.h"
 #include "GlobalHotkey.h"
 #include "PreviewWidget.h"
@@ -65,6 +67,7 @@ MainWindow::MainWindow(bool safeMode, QWidget *parent) : QMainWindow(parent), m_
 	connect(m_core, &ObsCore::logMessage, this, &MainWindow::log);
 	connect(m_core, &ObsCore::clipSaved, this, &MainWindow::onClipSaved);
 	connect(m_core, &ObsCore::replayStateChanged, this, &MainWindow::onReplayStateChanged);
+	connect(m_core, &ObsCore::killSoundDetected, this, &MainWindow::onKillSound);
 	connect(m_hotkey, &GlobalHotkey::activated, this, &MainWindow::onSaveClip);
 }
 
@@ -100,6 +103,17 @@ bool MainWindow::initialize(QString *error)
 		log("⚠ F9 단축키 등록 실패 (다른 프로그램이 사용 중일 수 있음)");
 
 	refreshClipList();
+
+	applyKillDetection();
+	connect(m_killAuto, &QCheckBox::toggled, this, [this] {
+		applyKillDetection();
+		saveSettings();
+		log(m_killAuto->isChecked() ? "킬 사운드 자동 저장 켬" : "킬 사운드 자동 저장 끔");
+	});
+	connect(m_killSens, &QComboBox::currentIndexChanged, this, [this] {
+		applyKillDetection();
+		saveSettings();
+	});
 
 	if (m_safeMode) {
 		log("안전 모드: 자동 녹화와 실시간 미리보기를 껐습니다. '버퍼 시작'으로 직접 켤 수 있어요.");
@@ -169,6 +183,25 @@ void MainWindow::buildUi()
 	m_saveSound = new QCheckBox("클립 저장 시 알림음");
 	m_saveSound->setToolTip("'게임 소리만 녹음'을 끈 상태에서 켜면 알림음이 다음 클립에 녹음될 수 있어요");
 	m_autoStart = new QCheckBox("실행 시 자동 시작");
+
+	// 킬 사운드 자동 저장
+	m_killAuto = new QCheckBox("킬 사운드가 들리면 자동 저장");
+	m_killAuto->setToolTip("게임 소리에서 킬(빈사) 효과음을 알아듣고, 4초 뒤에 클립을 저장합니다.\n"
+			       "연속 킬은 한 클립으로 묶어 저장해요. 가까운 아군의 킬 사운드에도 반응할 수 있어요.\n"
+			       "'게임 소리만 녹음'을 켜 두면 유튜브·디스코드 소리에 잘못 반응하지 않아요.");
+	m_killSens = new QComboBox;
+	m_killSens->addItem("민감하게", KillSoundDetector::kThresholdHigh);
+	m_killSens->addItem("보통", KillSoundDetector::kThresholdNormal);
+	m_killSens->addItem("덜 민감하게", KillSoundDetector::kThresholdLow);
+	m_killSens->setToolTip("놓치는 킬이 있으면 '민감하게', 킬이 아닌데 저장되면 '덜 민감하게'");
+	m_killSaveTimer = new QTimer(this);
+	m_killSaveTimer->setSingleShot(true);
+	connect(m_killSaveTimer, &QTimer::timeout, this, [this] {
+		if (!m_core->isReplayActive())
+			return;
+		log("킬 장면 자동 저장");
+		onSaveClip();
+	});
 	auto *applyBtn = new QPushButton("설정 적용");
 	m_toggleBtn = new QPushButton("버퍼 시작");
 	m_saveBtn = new QPushButton("클립 저장 (F9)");
@@ -182,6 +215,10 @@ void MainWindow::buildUi()
 	recForm->addRow(m_gameAudioOnly);
 	recForm->addRow(m_saveSound);
 	recForm->addRow(m_autoStart);
+	auto *killRow = new QHBoxLayout;
+	killRow->addWidget(m_killAuto, 1);
+	killRow->addWidget(m_killSens);
+	recForm->addRow(killRow);
 	auto *btnRow = new QHBoxLayout;
 	btnRow->addWidget(applyBtn);
 	btnRow->addWidget(m_toggleBtn);
@@ -306,6 +343,8 @@ void MainWindow::loadSettings()
 	m_gameAudioOnly->setChecked(s.value("gameAudioOnly", true).toBool());
 	m_saveSound->setChecked(s.value("saveSound", false).toBool());
 	m_autoStart->setChecked(s.value("autoStart", true).toBool());
+	m_killAuto->setChecked(s.value("killAuto", false).toBool());
+	m_killSens->setCurrentIndex(std::clamp(s.value("killSens", 1).toInt(), 0, 2));
 	m_favorites = s.value("favoriteClips").toStringList();
 	m_favOnly->blockSignals(true);
 	m_favOnly->setChecked(s.value("favoriteOnly", false).toBool());
@@ -325,6 +364,8 @@ void MainWindow::saveSettings()
 	s.setValue("gameAudioOnly", m_gameAudioOnly->isChecked());
 	s.setValue("saveSound", m_saveSound->isChecked());
 	s.setValue("autoStart", m_autoStart->isChecked());
+	s.setValue("killAuto", m_killAuto->isChecked());
+	s.setValue("killSens", m_killSens->currentIndex());
 	s.setValue("favoriteClips", m_favorites);
 	s.setValue("favoriteOnly", m_favOnly->isChecked());
 	s.setValue("outputDir", m_outputDir);
@@ -628,6 +669,8 @@ void MainWindow::showClipMenu(const QPoint &pos)
 		menu.addAction("폴더에서 보기", this, [path] {
 			QProcess::startDetached("explorer.exe", {"/select,", QDir::toNativeSeparators(path)});
 		});
+	if (!multi)
+		menu.addAction("🔎 이 클립에서 킬 사운드 찾기 (테스트)", this, [this, path] { findKillSoundsInClip(path); });
 	menu.addSeparator();
 	menu.addAction("휴지통으로 삭제 (Delete)", this, &MainWindow::deleteClips);
 	menu.exec(m_clips->viewport()->mapToGlobal(pos));
@@ -701,4 +744,70 @@ void MainWindow::closeEvent(QCloseEvent *e)
 	m_preview->destroyDisplay(); // obs_shutdown 전에 디스플레이부터 해제
 	m_core->shutdown();
 	e->accept();
+}
+
+// ─── 킬 사운드 자동 저장 ──────────────────────────────────
+double MainWindow::killThreshold() const { return m_killSens->currentData().toDouble(); }
+
+void MainWindow::applyKillDetection() { m_core->setKillDetection(m_killAuto->isChecked(), killThreshold()); }
+
+void MainWindow::onKillSound(double score, int kind)
+{
+	log(QString("킬 사운드 감지: %1 (일치도 %2)")
+		    .arg(QString::fromUtf8(KillSoundDetector::kindName(kind)))
+		    .arg(score, 0, 'f', 2));
+	if (!m_killAuto->isChecked() || !m_core->isReplayActive())
+		return;
+	// 감지 4초 뒤 저장. 그 사이 또 킬이 나면 미뤄서 연속 킬을 한 클립에 담음 (최대 첫 킬 후 12초)
+	const qint64 now = QDateTime::currentMSecsSinceEpoch();
+	if (!m_killSaveTimer->isActive())
+		m_killFirstMs = now;
+	const qint64 wait = std::clamp<qint64>(m_killFirstMs + 12000 - now, 0, 4000);
+	m_killSaveTimer->start(int(wait));
+	m_status->setText("<b style='color:#f5b400'>⚔ 킬 감지 — 곧 저장</b>");
+}
+
+void MainWindow::findKillSoundsInClip(const QString &path)
+{
+	log("킬 사운드 찾는 중: " + QFileInfo(path).fileName());
+	auto *proc = new QProcess(this);
+	auto *pcm = new QByteArray;
+	connect(proc, &QProcess::readyReadStandardOutput, this, [proc, pcm] { *pcm += proc->readAllStandardOutput(); });
+	connect(proc, &QProcess::readyReadStandardError, this, [proc] { proc->readAllStandardError(); });
+	connect(proc, &QProcess::finished, this, [this, proc, pcm, path](int code, QProcess::ExitStatus) {
+		*pcm += proc->readAllStandardOutput();
+		proc->deleteLater();
+		const QByteArray data = *pcm;
+		delete pcm;
+		if (code != 0 || data.isEmpty()) {
+			log("클립의 소리를 읽지 못했어요 (소리가 없는 클립일 수 있어요)");
+			return;
+		}
+		KillSoundDetector det;
+		det.setThreshold(killThreshold());
+		std::vector<KillSoundDetector::Hit> hits;
+		const auto *x = reinterpret_cast<const float *>(data.constData());
+		const int n = int(data.size() / int(sizeof(float)));
+		for (int i = 0; i < n; i += 4096)
+			det.process(x + i, std::min(4096, n - i), &hits);
+		if (hits.empty()) {
+			log(QString("킬 사운드를 찾지 못했어요 (가장 비슷했던 일치도 %1, 기준 %2). "
+				    "킬이 있는 클립인데 못 찾으면 민감도를 높여 보세요.")
+				    .arg(det.maxScore(), 0, 'f', 2)
+				    .arg(killThreshold(), 0, 'f', 2));
+			return;
+		}
+		QStringList parts;
+		for (const auto &h : hits) {
+			const int m = int(h.time) / 60;
+			parts << QString("%1:%2 %3(%4)")
+					 .arg(m)
+					 .arg(h.time - m * 60, 4, 'f', 1, QChar('0'))
+					 .arg(QString::fromUtf8(KillSoundDetector::kindName(h.kind)))
+					 .arg(h.score, 0, 'f', 2);
+		}
+		log(QString("킬 사운드 %1번: %2").arg(hits.size()).arg(parts.join(", ")));
+	});
+	proc->start(ShortsExporter::ffmpegPath(), {"-hide_banner", "-loglevel", "error", "-i", path, "-vn", "-ac", "1",
+						   "-ar", "48000", "-f", "f32le", "-"});
 }

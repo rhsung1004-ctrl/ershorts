@@ -1,5 +1,7 @@
 #include "ObsCore.h"
 
+#include "KillSoundDetector.h"
+
 #include <QCoreApplication>
 #include <QDir>
 #include <QGuiApplication>
@@ -10,6 +12,8 @@
 
 #include <graphics/vec2.h>
 
+#include <vector>
+
 namespace {
 // OBS 기본 채널 배치와 맞춤: 0 = 씬, 1 = 데스크톱 오디오, 3 = 마이크
 constexpr uint32_t kChannelScene = 0;
@@ -19,7 +23,7 @@ constexpr uint32_t kChannelMic = 3;
 QByteArray u8(const QString &s) { return s.toUtf8(); }
 } // namespace
 
-ObsCore::ObsCore(QObject *parent) : QObject(parent) {}
+ObsCore::ObsCore(QObject *parent) : QObject(parent), m_kill(std::make_unique<KillSoundDetector>()) {}
 
 ObsCore::~ObsCore() { shutdown(); }
 
@@ -108,6 +112,7 @@ void ObsCore::createScene()
 
 void ObsCore::rebuildCaptureSource()
 {
+	detachKillListener(); // 소스를 지우기 전에 소리 듣기를 먼저 끊음
 	if (m_captureItem) {
 		obs_sceneitem_remove(m_captureItem);
 		m_captureItem = nullptr;
@@ -226,6 +231,7 @@ void ObsCore::retargetWindowIfNeeded()
 
 void ObsCore::rebuildAudioSources()
 {
+	detachKillListener();
 	obs_set_output_source(kChannelDesktop, nullptr);
 	obs_set_output_source(kChannelMic, nullptr);
 	if (m_desktopAudio) {
@@ -354,6 +360,7 @@ bool ObsCore::applySettings(const Settings &s, QString *error)
 
 	rebuildCaptureSource();
 	rebuildAudioSources();
+	attachKillListener();
 	if (!createEncodersAndOutput(error))
 		return false;
 
@@ -466,6 +473,7 @@ void ObsCore::shutdown()
 		return;
 
 	releaseOutput();
+	detachKillListener();
 
 	for (uint32_t ch = 0; ch < MAX_CHANNELS; ++ch)
 		obs_set_output_source(ch, nullptr);
@@ -493,4 +501,66 @@ void ObsCore::shutdown()
 
 	obs_shutdown();
 	m_started = false;
+}
+
+// ─── 킬 사운드 감지 ───────────────────────────────────────
+void ObsCore::setKillDetection(bool on, double threshold)
+{
+	{
+		std::lock_guard<std::mutex> lock(m_killMutex);
+		m_kill->setThreshold(threshold);
+		if (on && !m_killOn.load())
+			m_kill->reset();
+	}
+	m_killOn.store(on);
+}
+
+void ObsCore::attachKillListener()
+{
+	detachKillListener();
+	// 게임 소리만 녹음하면 창 캡처 소스가 게임 소리를 내보내고, 아니면 데스크톱 소리
+	const bool appAudio = m_settings.gameAudioOnly && m_settings.captureMode == CaptureMode::Window;
+	obs_source_t *src = appAudio ? m_capture : m_desktopAudio;
+	if (!src)
+		return;
+	{
+		std::lock_guard<std::mutex> lock(m_killMutex);
+		m_kill->reset();
+	}
+	obs_source_add_audio_capture_callback(src, &ObsCore::onAudioCapture, this);
+	m_listenSrc = src;
+}
+
+void ObsCore::detachKillListener()
+{
+	if (!m_listenSrc)
+		return;
+	obs_source_remove_audio_capture_callback(m_listenSrc, &ObsCore::onAudioCapture, this);
+	m_listenSrc = nullptr;
+}
+
+void ObsCore::onAudioCapture(void *param, obs_source_t *, const struct audio_data *audio, bool)
+{
+	auto *self = static_cast<ObsCore *>(param);
+	if (!self->m_killOn.load() || !audio || audio->frames == 0 || !audio->data[0])
+		return;
+	// OBS 내부 형식: 48kHz float 플레인 → 모노로 합침
+	const auto *l = reinterpret_cast<const float *>(audio->data[0]);
+	const auto *r = audio->data[1] ? reinterpret_cast<const float *>(audio->data[1]) : l;
+	thread_local std::vector<float> mono;
+	thread_local std::vector<KillSoundDetector::Hit> hits;
+	mono.resize(audio->frames);
+	for (uint32_t i = 0; i < audio->frames; ++i)
+		mono[i] = 0.5f * (l[i] + r[i]);
+	hits.clear();
+	{
+		std::lock_guard<std::mutex> lock(self->m_killMutex);
+		self->m_kill->process(mono.data(), int(mono.size()), &hits);
+	}
+	for (const KillSoundDetector::Hit &h : hits) {
+		const double score = h.score;
+		const int kind = h.kind;
+		QMetaObject::invokeMethod(
+			self, [self, score, kind] { emit self->killSoundDetected(score, kind); }, Qt::QueuedConnection);
+	}
 }
