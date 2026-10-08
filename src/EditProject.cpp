@@ -401,6 +401,8 @@ QJsonObject TitleBands::toJson(bool withText) const
 {
 	QJsonObject o{{"top", topHeight},
 		      {"bottom", bottomHeight},
+		      {"topOn", topOn},
+		      {"bottomOn", bottomOn},
 		      {"background", background.name()},
 		      {"titleSize", titleSize},
 		      {"titleColor", titleColor.name()},
@@ -426,6 +428,8 @@ void TitleBands::fromJson(const QJsonObject &b, bool withText)
 	const TitleBands def;
 	topHeight = std::clamp(b.value("top").toInt(def.topHeight), 0, 800) & ~1;
 	bottomHeight = std::clamp(b.value("bottom").toInt(def.bottomHeight), 0, 800) & ~1;
+	topOn = b.value("topOn").toBool(true);
+	bottomOn = b.value("bottomOn").toBool(true);
 	background = QColor(b.value("background").toString(def.background.name()));
 	titleSize = std::clamp(b.value("titleSize").toInt(def.titleSize), 20, 220);
 	titleColor = QColor(b.value("titleColor").toString(def.titleColor.name()));

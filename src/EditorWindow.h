@@ -64,6 +64,7 @@ private:
 	QWidget *buildLayoutTab();
 	void rebuildBandVisuals();
 	void onBandPropsChanged();
+	void updateBandEnables();
 
 	// ── 글꼴 ──
 	QComboBox *makeFontCombo();
@@ -316,6 +317,7 @@ private:
 		    *m_bandBg = nullptr;
 	QComboBox *m_bandTitleFont = nullptr, *m_bandSubFont = nullptr, *m_bandBottomFont = nullptr;
 	QSlider *m_bandTopH = nullptr, *m_bandBottomH = nullptr, *m_bandZoom = nullptr, *m_bandOffset = nullptr;
+	QComboBox *m_bandMode = nullptr; // 여백: 위·아래 / 위만 / 아래만 / 없음
 
 	// 내보내기 탭
 	QComboBox *m_layout = nullptr;

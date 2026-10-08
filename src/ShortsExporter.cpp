@@ -310,7 +310,7 @@ QString ShortsExporter::buildFilter()
 		g << m + "[mid]";
 
 		// 위/아래 띠 + 글씨 (줄마다 가운데 정렬)
-		QString b = QString("[mid]pad=1080:1920:0:%1:color=%2").arg(p.bands.topHeight).arg(hexColor(p.bands.background));
+		QString b = QString("[mid]pad=1080:1920:0:%1:color=%2").arg(p.bands.topH()).arg(hexColor(p.bands.background));
 		int k = 0;
 		for (const BandLine &l : BandLayout::lines(p)) {
 			b += QString(",drawtext=fontfile=%1:textfile=%2:fontsize=%3:fontcolor=%4:x=(w-text_w)/2:y=%5+(%6-text_h)/2")

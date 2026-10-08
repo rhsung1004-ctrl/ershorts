@@ -61,11 +61,11 @@ QVector<BandLine> lines(const EditProject &p)
 	QVector<BandLine> top;
 	addLines(top, b.title, b.titleSize, b.titleColor, b.titleFont);
 	addLines(top, b.subtitle, b.subtitleSize, b.subtitleColor, b.subtitleFont);
-	stack(out, top, 0, b.topHeight);
+	stack(out, top, 0, b.topH()); // 꺼진 띠(높이 0)의 글씨는 그리지 않음
 
 	QVector<BandLine> bottom;
 	addLines(bottom, b.bottomText, b.bottomSize, b.bottomColor, b.bottomFont);
-	stack(out, bottom, 1920 - b.bottomHeight, b.bottomHeight);
+	stack(out, bottom, 1920 - b.bottomH(), b.bottomH());
 	return out;
 }
 

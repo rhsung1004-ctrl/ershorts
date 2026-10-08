@@ -120,8 +120,12 @@ enum class ShortsLayout { CenterCrop = 0, CropWithMinimap = 1, BlurBackground = 
 
 // "제목 띠" 레이아웃: 위/아래에 단색 띠를 두고 글씨를 넣음, 가운데는 게임 화면
 struct TitleBands {
-	int topHeight = 330;    // 1080x1920 캔버스 기준 px
+	int topHeight = 330;    // 1080x1920 캔버스 기준 px (꺼져 있어도 다시 켤 때를 위해 기억)
 	int bottomHeight = 330;
+	bool topOn = true;      // 위 여백 사용 (끄면 그만큼 게임 화면이 채움)
+	bool bottomOn = true;   // 아래 여백 사용
+	int topH() const { return topOn ? topHeight : 0; }       // 실제로 쓰는 높이
+	int bottomH() const { return bottomOn ? bottomHeight : 0; }
 	QColor background = Qt::black;
 
 	QString title;          // 위 띠 큰 글씨 (여러 줄 가능)
@@ -140,7 +144,7 @@ struct TitleBands {
 	double zoom = 1.0;      // 가운데 영상 확대 (1.0 ~ 2.0)
 	double offsetY = 0.0;   // 가운데 영상 세로 위치 (-1 = 위쪽, 0 = 가운데, 1 = 아래쪽)
 
-	int middleHeight() const { return 1920 - topHeight - bottomHeight; }
+	int middleHeight() const { return 1920 - topH() - bottomH(); }
 
 	// withText = false 면 글씨 내용(제목/부제/아래 문구)은 빼고 모양만
 	QJsonObject toJson(bool withText = true) const;

@@ -903,6 +903,18 @@ QWidget *EditorWindow::buildLayoutTab()
 	m_bandBox = box;
 	auto *f = new QFormLayout(box);
 
+	// 여백(띠)을 위/아래 어디에 둘지: 끈 쪽은 게임 화면이 채움
+	m_bandMode = new QComboBox;
+	m_bandMode->addItem("위·아래 여백", 3);
+	m_bandMode->addItem("위에만 여백 (아래는 화면으로 채움)", 1);
+	m_bandMode->addItem("아래에만 여백 (위는 화면으로 채움)", 2);
+	m_bandMode->addItem("여백 없음 (화면 꽉 채움)", 0);
+	f->addRow("여백", m_bandMode);
+	connect(m_bandMode, &QComboBox::currentIndexChanged, this, [this] {
+		updateBandEnables();
+		onBandPropsChanged();
+	});
+
 	auto sizeSpin = [](int lo, int hi) {
 		auto *sp = new QSpinBox;
 		sp->setRange(lo, hi);
@@ -998,6 +1010,9 @@ void EditorWindow::onBandPropsChanged()
 	b.bottomSize = m_bandBottomSize->value();
 	b.topHeight = m_bandTopH->value() & ~1;
 	b.bottomHeight = m_bandBottomH->value() & ~1;
+	const int mode = m_bandMode->currentData().toInt();
+	b.topOn = (mode & 1) != 0;
+	b.bottomOn = (mode & 2) != 0;
 	b.zoom = m_bandZoom->value() / 100.0;
 	b.offsetY = m_bandOffset->value() / 100.0;
 	b.titleFont = m_bandTitleFont->currentData().toString();
@@ -1005,6 +1020,21 @@ void EditorWindow::onBandPropsChanged()
 	b.bottomFont = m_bandBottomFont->currentData().toString();
 	applyLayoutToPreview();
 	projectChanged();
+}
+
+void EditorWindow::updateBandEnables()
+{
+	// 끈 여백의 글씨·높이 칸은 흐리게 (값은 남겨 둬서 다시 켜면 그대로)
+	const int mode = m_bandMode->currentData().toInt();
+	const bool top = (mode & 1) != 0, bottom = (mode & 2) != 0;
+	for (QWidget *w : std::initializer_list<QWidget *>{m_bandTitle, m_bandTitleSize, m_bandTitleColor, m_bandTitleFont,
+							   m_bandSubtitle, m_bandSubSize, m_bandSubColor, m_bandSubFont,
+							   m_bandTopH})
+		w->setEnabled(top);
+	for (QWidget *w : std::initializer_list<QWidget *>{m_bandBottomText, m_bandBottomSize, m_bandBottomColor,
+							   m_bandBottomFont, m_bandBottomH})
+		w->setEnabled(bottom);
+	m_bandBg->setEnabled(top || bottom);
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -1745,6 +1775,9 @@ void EditorWindow::loadUiFromProject(bool keepPosition)
 		paintColorButton(m_bandBg, b.background);
 		m_bandTopH->setValue(b.topHeight);
 		m_bandBottomH->setValue(b.bottomHeight);
+		m_bandMode->setCurrentIndex(
+			std::max(0, m_bandMode->findData((b.topOn ? 1 : 0) | (b.bottomOn ? 2 : 0))));
+		updateBandEnables();
 		m_bandZoom->setValue(int(std::lround(b.zoom * 100)));
 		m_bandOffset->setValue(int(std::lround(b.offsetY * 100)));
 		setFontComboValue(m_bandTitleFont, b.titleFont);
@@ -2052,7 +2085,7 @@ void EditorWindow::applyLayoutToPreview()
 	m_canvas->setBrush(blur ? QColor("#22222A") : QColor("#111114"));
 
 	const TitleBands &tb = m_project.bands;
-	const double midTop = bands ? tb.topHeight : 0.0;
+	const double midTop = bands ? tb.topH() : 0.0;
 	const double midH = bands ? tb.middleHeight() : kCanvasH;
 	m_videoClip->setRect(0, midTop, kCanvasW, midH);
 
@@ -2101,12 +2134,12 @@ void EditorWindow::rebuildBandVisuals()
 
 	const bool bands = (m_project.layout == ShortsLayout::TitleBands);
 	const TitleBands &tb = m_project.bands;
-	m_bandTop->setVisible(bands && tb.topHeight > 0);
-	m_bandBottom->setVisible(bands && tb.bottomHeight > 0);
+	m_bandTop->setVisible(bands && tb.topH() > 0);
+	m_bandBottom->setVisible(bands && tb.bottomH() > 0);
 	if (!bands)
 		return;
-	m_bandTop->setRect(0, 0, kCanvasW, tb.topHeight);
-	m_bandBottom->setRect(0, kCanvasH - tb.bottomHeight, kCanvasW, tb.bottomHeight);
+	m_bandTop->setRect(0, 0, kCanvasW, tb.topH());
+	m_bandBottom->setRect(0, kCanvasH - tb.bottomH(), kCanvasW, tb.bottomH());
 	m_bandTop->setBrush(tb.background);
 	m_bandBottom->setBrush(tb.background);
 
