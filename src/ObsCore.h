@@ -79,6 +79,7 @@ private:
 	void createScene();
 	void rebuildCaptureSource();
 	void rebuildAudioSources();
+	QString wantedTarget() const; // 지정한 창, 자동이면 찾은 이터널리턴 창
 	bool createEncodersAndOutput(QString *error);
 	void releaseOutput();
 	QString pickVideoEncoder() const;
@@ -101,6 +102,7 @@ private:
 	obs_sceneitem_t *m_captureItem = nullptr;
 	QString m_windowTarget; // 창 캡처가 지금 붙어 있는 창
 	obs_source_t *m_desktopAudio = nullptr;
+	obs_source_t *m_gameAudio = nullptr; // 이터널리턴 프로그램 소리만 (캡처 방식과 상관없이)
 	obs_source_t *m_micAudio = nullptr;
 
 	obs_encoder_t *m_venc = nullptr;

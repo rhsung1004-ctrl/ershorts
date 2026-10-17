@@ -81,6 +81,7 @@ private:
 
 	// 저장 폴더 바꾸기 (다른 드라이브 가능)
 	void chooseOutputDir();
+	void updateCursorLock();
 	void updateOutputDirLabel();
 
 	ObsCore *m_core = nullptr;
@@ -96,6 +97,8 @@ private:
 	QCheckBox *m_mic = nullptr;
 	QCheckBox *m_autoStart = nullptr;
 	QCheckBox *m_gameAudioOnly = nullptr;
+	QCheckBox *m_cursorLock = nullptr;
+	bool m_cursorClipped = false;
 	QCheckBox *m_saveSound = nullptr;
 	QCheckBox *m_killAuto = nullptr;
 	QComboBox *m_killDelay = nullptr;

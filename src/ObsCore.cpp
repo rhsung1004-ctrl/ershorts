@@ -164,22 +164,28 @@ void ObsCore::rebuildCaptureSource()
 		obs_data_set_int(s, "priority", 2); // 실행 파일 이름으로 창을 다시 찾음 (창 제목이 바뀌어도 OK)
 		obs_data_set_bool(s, "cursor", false);
 		obs_data_set_bool(s, "client_area", true);
-		// 게임 창의 소리만 따로 녹음 (Windows 10 2004 이상). 이때는 데스크톱 소리를 녹음하지 않음
-		obs_data_set_bool(s, "capture_audio", m_settings.gameAudioOnly);
+		// 소리는 따로 (게임 프로그램 소리 소스) 받으므로 여기서는 끔
+		obs_data_set_bool(s, "capture_audio", false);
 		if (target.isEmpty())
 			emit logMessage("이터널리턴 창을 아직 찾지 못했어요. 게임을 켜면 자동으로 연결됩니다.");
 		else
 			emit logMessage("캡처할 창: " + target);
 	} else if (m_settings.captureMode == CaptureMode::Game) {
 		id = "game_capture";
-		if (m_settings.gameWindow.trimmed().isEmpty()) {
-			obs_data_set_string(s, "capture_mode", "any_fullscreen");
+		// 이터널리턴 창을 콕 집어서 잡음 (전체화면 아무거나 잡는 방식은 다른 창을 잡거나 놓치기 쉬움)
+		const QString target = wantedTarget();
+		m_windowTarget = target;
+		if (target.isEmpty()) {
+			obs_data_set_string(s, "capture_mode", "any_fullscreen"); // 게임을 켜면 3초 안에 창 지정으로 바뀜
+			emit logMessage("이터널리턴 창을 아직 찾지 못했어요. 게임을 켜면 자동으로 연결됩니다.");
 		} else {
-			// 형식: "창제목:창클래스:실행파일.exe" (OBS 게임 캡처의 window 문자열과 동일)
+			// 형식: "창제목:창클래스:실행파일.exe", priority 2 = 실행 파일 이름으로 다시 찾음
 			obs_data_set_string(s, "capture_mode", "window");
-			obs_data_set_string(s, "window", u8(m_settings.gameWindow).constData());
-			obs_data_set_int(s, "priority", 2); // 실행파일 이름 우선 매칭
+			obs_data_set_string(s, "window", u8(target).constData());
+			obs_data_set_int(s, "priority", 2);
+			emit logMessage("게임 캡처 대상: " + target);
 		}
+		obs_data_set_bool(s, "anti_cheat_hook", true);
 		obs_data_set_bool(s, "capture_cursor", false);
 		obs_data_set_bool(s, "allow_transparency", false);
 	} else {
@@ -242,52 +248,89 @@ QString ObsCore::findEternalReturnWindow()
 
 void ObsCore::retargetWindowIfNeeded()
 {
-	if (!m_capture || m_settings.captureMode != CaptureMode::Window || !m_windowTarget.isEmpty() ||
-	    !m_settings.gameWindow.trimmed().isEmpty())
+	// 자동 모드에서 아직 이터널리턴 창을 못 찾았으면 다시 찾아서 캡처·소리 모두 연결
+	if (!m_settings.gameWindow.trimmed().isEmpty() || !m_windowTarget.isEmpty())
+		return;
+	const bool needVideo = m_capture && m_settings.captureMode != CaptureMode::Monitor;
+	const bool needAudio = m_gameAudio != nullptr;
+	if (!needVideo && !needAudio)
 		return;
 	const QString found = findEternalReturnWindow();
 	if (found.isEmpty())
 		return;
 	m_windowTarget = found;
-	obs_data_t *s = obs_source_get_settings(m_capture);
-	obs_data_set_string(s, "window", u8(found).constData());
-	obs_source_update(m_capture, s);
-	obs_data_release(s);
-	emit logMessage("이터널리턴 창을 찾아서 연결했어요");
+	if (needVideo) {
+		obs_data_t *s = obs_source_get_settings(m_capture);
+		if (m_settings.captureMode == CaptureMode::Game) {
+			obs_data_set_string(s, "capture_mode", "window");
+			obs_data_set_int(s, "priority", 2);
+		}
+		obs_data_set_string(s, "window", u8(found).constData());
+		obs_source_update(m_capture, s);
+		obs_data_release(s);
+	}
+	if (needAudio) {
+		obs_data_t *s = obs_source_get_settings(m_gameAudio);
+		obs_data_set_string(s, "window", u8(found).constData());
+		obs_source_update(m_gameAudio, s);
+		obs_data_release(s);
+	}
+	emit logMessage("이터널리턴 창을 찾아서 연결했어요: " + found);
+}
+
+QString ObsCore::wantedTarget() const
+{
+	const QString manual = m_settings.gameWindow.trimmed();
+	return manual.isEmpty() ? findEternalReturnWindow() : manual;
 }
 
 void ObsCore::rebuildAudioSources()
 {
 	obs_set_output_source(kChannelDesktop, nullptr);
 	obs_set_output_source(kChannelMic, nullptr);
-	if (m_desktopAudio) {
-		obs_source_release(m_desktopAudio);
-		m_desktopAudio = nullptr;
-	}
-	if (m_micAudio) {
-		obs_source_release(m_micAudio);
-		m_micAudio = nullptr;
+	for (obs_source_t **src : {&m_desktopAudio, &m_gameAudio, &m_micAudio}) {
+		if (*src) {
+			obs_source_release(*src);
+			*src = nullptr;
+		}
 	}
 
-	obs_data_t *s = obs_data_create();
-	obs_data_set_string(s, "device_id", "default");
-
-	const bool appAudio = m_settings.gameAudioOnly && m_settings.captureMode == CaptureMode::Window;
-	if (appAudio) {
-		emit logMessage("소리: 게임 소리만 녹음 (Windows 알림음, 디스코드 등은 녹음 안 됨)");
-	} else {
+	if (m_settings.gameAudioOnly) {
+		// 이터널리턴 프로그램이 내는 소리만 녹음 (Windows 10 2004 이상)
+		// → 유튜브 음악, 디스코드, 알림음은 녹음 안 됨. 캡처 방식(창/게임/모니터)과 상관없이 동작
+		const QString target = m_windowTarget.isEmpty() ? wantedTarget() : m_windowTarget;
+		obs_data_t *s = obs_data_create();
+		obs_data_set_string(s, "window", u8(target).constData());
+		obs_data_set_int(s, "priority", 2); // 실행 파일 이름으로 찾음 (게임을 껐다 켜도 다시 연결)
+		m_gameAudio = obs_source_create("wasapi_process_output_capture", "Game Audio", s, nullptr);
+		obs_data_release(s);
+		if (m_gameAudio) {
+			obs_set_output_source(kChannelDesktop, m_gameAudio);
+			emit logMessage(target.isEmpty() ? "소리: 게임 소리만 녹음 (게임을 켜면 자동 연결)"
+							 : "소리: 게임 소리만 녹음 — 유튜브·디스코드·알림음은 녹음 안 됨");
+		} else {
+			emit logMessage("⚠ 게임 소리만 녹음을 쓸 수 없어 컴퓨터 전체 소리를 녹음합니다 (Windows 10 2004 이상 필요)");
+		}
+	}
+	if (!m_gameAudio) {
+		obs_data_t *s = obs_data_create();
+		obs_data_set_string(s, "device_id", "default");
 		m_desktopAudio = obs_source_create("wasapi_output_capture", "Desktop Audio", s, nullptr);
+		obs_data_release(s);
 		if (m_desktopAudio)
 			obs_set_output_source(kChannelDesktop, m_desktopAudio);
-		emit logMessage("소리: 컴퓨터 전체 소리 녹음");
+		if (!m_settings.gameAudioOnly)
+			emit logMessage("소리: 컴퓨터 전체 소리 녹음");
 	}
 
 	if (m_settings.captureMic) {
+		obs_data_t *s = obs_data_create();
+		obs_data_set_string(s, "device_id", "default");
 		m_micAudio = obs_source_create("wasapi_input_capture", "Mic", s, nullptr);
+		obs_data_release(s);
 		if (m_micAudio)
 			obs_set_output_source(kChannelMic, m_micAudio);
 	}
-	obs_data_release(s);
 }
 
 QString ObsCore::pickVideoEncoder() const
@@ -516,6 +559,10 @@ void ObsCore::shutdown()
 	if (m_desktopAudio) {
 		obs_source_release(m_desktopAudio);
 		m_desktopAudio = nullptr;
+	}
+	if (m_gameAudio) {
+		obs_source_release(m_gameAudio);
+		m_gameAudio = nullptr;
 	}
 	if (m_micAudio) {
 		obs_source_release(m_micAudio);

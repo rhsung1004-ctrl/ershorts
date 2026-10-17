@@ -96,13 +96,22 @@ bool MainWindow::initialize(QString *error)
 	// 캡처 방식/창을 바꾸면 바로 적용
 	connect(m_captureMode, &QComboBox::currentIndexChanged, this, [this] {
 		m_gameWindow->setEnabled(m_captureMode->currentData().toInt() != int(ObsCore::CaptureMode::Monitor));
-		m_gameAudioOnly->setEnabled(m_captureMode->currentData().toInt() == int(ObsCore::CaptureMode::Window));
 		onApplySettings();
 	});
 	connect(m_gameWindow, &QComboBox::activated, this, [this] { onApplySettings(); });
 	connect(m_gameAudioOnly, &QCheckBox::toggled, this, [this] { onApplySettings(); });
 	m_gameWindow->setEnabled(m_captureMode->currentData().toInt() != int(ObsCore::CaptureMode::Monitor));
-	m_gameAudioOnly->setEnabled(m_captureMode->currentData().toInt() == int(ObsCore::CaptureMode::Window));
+
+	// 마우스 가두기: 이터널리턴이 맨 앞일 때 0.25초마다 커서를 게임 창 안으로 제한
+	auto *cursorTimer = new QTimer(this);
+	connect(cursorTimer, &QTimer::timeout, this, &MainWindow::updateCursorLock);
+	cursorTimer->start(250);
+	connect(m_cursorLock, &QCheckBox::toggled, this, [this](bool on) {
+		saveSettings();
+		updateCursorLock();
+		log(on ? "마우스 가두기 켬: 이터널리턴이 맨 앞에 있을 때 마우스가 게임 창 밖으로 안 나가요 (Alt+Tab 하면 풀림)"
+		       : "마우스 가두기 끔");
+	});
 
 	// 게임을 프로그램보다 늦게 켜도 창 캡처가 자동으로 연결되도록 3초마다 확인
 	auto *retarget = new QTimer(this);
@@ -194,9 +203,13 @@ void MainWindow::buildUi()
 	m_bufferSec->setRange(10, 300);
 	m_bufferSec->setSuffix(" 초");
 	m_mic = new QCheckBox("마이크 녹음");
-	m_gameAudioOnly = new QCheckBox("게임 소리만 녹음 (알림음·디스코드 제외)");
-	m_gameAudioOnly->setToolTip("창 캡처일 때 이터널리턴 프로그램의 소리만 녹음합니다.\n"
-				    "끄면 컴퓨터에서 나는 모든 소리를 녹음합니다.");
+	m_gameAudioOnly = new QCheckBox("게임 소리만 녹음 (유튜브·디스코드·알림음 제외)");
+	m_gameAudioOnly->setToolTip("이터널리턴 프로그램이 내는 소리만 녹음합니다. 캡처 방식과 상관없이 동작해요.\n"
+				    "끄면 컴퓨터에서 나는 모든 소리를 녹음합니다. (Windows 10 2004 이상)");
+	m_cursorLock = new QCheckBox("이터널리턴 창 안에 마우스 가두기 (듀얼 모니터)");
+	m_cursorLock->setToolTip("창 모드/테두리 없는 창 모드에서 마우스가 옆 모니터로 빠져나가지 않게 합니다.\n"
+				 "게임이 맨 앞에 있을 때만 동작하고, Alt+Tab 으로 다른 창을 누르면 바로 풀려요.\n"
+				 "이걸 켜면 안정적인 '창 캡처'를 그대로 쓸 수 있어요.");
 	m_saveSound = new QCheckBox("클립 저장 시 알림음");
 	m_saveSound->setToolTip("'게임 소리만 녹음'을 끈 상태에서 켜면 알림음이 다음 클립에 녹음될 수 있어요");
 	m_autoStart = new QCheckBox("실행 시 자동 시작");
@@ -247,6 +260,7 @@ void MainWindow::buildUi()
 	connect(outDirBtn, &QPushButton::clicked, this, &MainWindow::chooseOutputDir);
 	recForm->addRow(m_mic);
 	recForm->addRow(m_gameAudioOnly);
+	recForm->addRow(m_cursorLock);
 	recForm->addRow(m_saveSound);
 	recForm->addRow(m_autoStart);
 	m_nameByClock = new QCheckBox("클립 이름을 게임 시간으로 (예: 4일차 낮)");
@@ -379,6 +393,7 @@ void MainWindow::loadSettings()
 	m_bufferSec->setValue(s.value("bufferSec", 45).toInt());
 	m_mic->setChecked(s.value("mic", false).toBool());
 	m_gameAudioOnly->setChecked(s.value("gameAudioOnly", true).toBool());
+	m_cursorLock->setChecked(s.value("cursorLock", false).toBool());
 	m_saveSound->setChecked(s.value("saveSound", false).toBool());
 	m_autoStart->setChecked(s.value("autoStart", true).toBool());
 	m_killAuto->setChecked(s.value("killAutoHud", false).toBool());
@@ -403,6 +418,7 @@ void MainWindow::saveSettings()
 	s.setValue("bufferSec", m_bufferSec->value());
 	s.setValue("mic", m_mic->isChecked());
 	s.setValue("gameAudioOnly", m_gameAudioOnly->isChecked());
+	s.setValue("cursorLock", m_cursorLock->isChecked());
 	s.setValue("saveSound", m_saveSound->isChecked());
 	s.setValue("autoStart", m_autoStart->isChecked());
 	s.setValue("killAutoHud", m_killAuto->isChecked());
@@ -832,6 +848,10 @@ void MainWindow::changeEvent(QEvent *e)
 
 void MainWindow::closeEvent(QCloseEvent *e)
 {
+	if (m_cursorClipped) {
+		ClipCursor(nullptr);
+		m_cursorClipped = false;
+	}
 	saveSettings();
 	m_hotkey->unregisterKey();
 	m_preview->destroyDisplay(); // obs_shutdown 전에 디스플레이부터 해제
@@ -1105,4 +1125,47 @@ void MainWindow::chooseOutputDir()
 	onApplySettings(); // 녹화 저장 위치 적용 (버퍼가 켜져 있었으면 다시 시작)
 	refreshClipList();
 	log("저장 폴더: " + QDir::toNativeSeparators(newDir));
+}
+
+// ─── 마우스 가두기 ────────────────────────────────────────
+static bool isEternalReturnWindow(HWND hwnd)
+{
+	DWORD pid = 0;
+	GetWindowThreadProcessId(hwnd, &pid);
+	if (!pid)
+		return false;
+	HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+	if (!proc)
+		return false;
+	wchar_t buf[MAX_PATH];
+	DWORD len = MAX_PATH;
+	bool match = false;
+	if (QueryFullProcessImageNameW(proc, 0, buf, &len)) {
+		const QString exe = QFileInfo(QString::fromWCharArray(buf, int(len))).fileName().toLower();
+		match = exe.contains("eternal") || exe.contains(QString::fromUtf8("이터널"));
+	}
+	CloseHandle(proc);
+	return match;
+}
+
+void MainWindow::updateCursorLock()
+{
+	HWND fg = GetForegroundWindow();
+	const bool lock = m_cursorLock->isChecked() && fg && !IsIconic(fg) && isEternalReturnWindow(fg);
+	if (lock) {
+		RECT rc;
+		if (GetClientRect(fg, &rc) && rc.right > rc.left && rc.bottom > rc.top) {
+			POINT tl{rc.left, rc.top}, br{rc.right, rc.bottom};
+			ClientToScreen(fg, &tl);
+			ClientToScreen(fg, &br);
+			const RECT clip{tl.x, tl.y, br.x, br.y};
+			ClipCursor(&clip); // 창이 움직이거나 Windows 가 풀어도 0.25초마다 다시 걸어 줌
+			m_cursorClipped = true;
+			return;
+		}
+	}
+	if (m_cursorClipped) {
+		ClipCursor(nullptr);
+		m_cursorClipped = false;
+	}
 }
